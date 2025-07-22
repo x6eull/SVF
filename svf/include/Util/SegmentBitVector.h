@@ -151,7 +151,7 @@ public:
         SegmentBitVectorIterator() = delete;
         SegmentBitVectorIterator(const SegmentBitVector& vec, bool end = false)
             : // must be init to identify raw vector
-              indicesEnd(vec.indices.end()), end(end) {
+              indicesEnd(vec.indices.end()), end(end | vec.empty()) {
             if (end) return;
             indicesIt = vec.indices.begin();
             dataIt = vec.data.begin();
@@ -192,6 +192,7 @@ public:
             return !(*this == other);
         }
     };
+    using iterator = SegmentBitVectorIterator;
 
     /// Returns an iterator to the beginning of this SegmentBitVector.
     /// NOTE: If you modify the vector after creating an iterator, the iterator
@@ -250,7 +251,7 @@ public:
 
     /// Returns true if n is in this set.
     bool test(uint32_t n) const noexcept {
-        for (int i = 0; i < indices.size(); ++i) {
+        for (size_t i = 0; i < indices.size(); ++i) {
             const auto ind = indices[i];
             if (ind > n) break; // early return
             if (n >= ind && n < ind + SegmentBits)
@@ -260,7 +261,7 @@ public:
     }
 
     void set(uint32_t n) noexcept {
-        int i = 0;
+        size_t i = 0;
         for (; i < indices.size(); ++i) {
             const auto ind = indices[i];
             if (ind > n) break; // early return
@@ -280,7 +281,7 @@ public:
     }
 
     void reset(uint32_t n) noexcept {
-        for (int i = 0; i < indices.size(); ++i) {
+        for (size_t i = 0; i < indices.size(); ++i) {
             const auto ind = indices[i];
             if (ind > n) break; // early return
             if (n >= ind && n < ind + SegmentBits) {
@@ -436,6 +437,18 @@ public:
         // TODO: inefficient!
         *this = lhs;
         return intersectWithComplement(rhs);
+    }
+
+    size_t hash() const noexcept {
+        // TODO: improve
+        size_t h = size();
+        for (const auto& ind : indices)
+            h ^= std::hash<indice_t>()(ind);
+        for (const auto& seg : data)
+            for (size_t i = 0; i < UnitsPerSegment; ++i)
+                h ^= std::hash<UnitType>()(seg.data[i]);
+
+        return h;
     }
 };
 } // namespace SVF

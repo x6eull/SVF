@@ -65,7 +65,7 @@ inline uint32_t popcnt(const void* addr, size_t size) {
         __m512i v0 = _mm512_loadu_si512(addr);
         __m512i c = _mm512_popcnt_epi64(v0);
         const __m512i* cur_addr = reinterpret_cast<const __m512i*>(addr);
-        for (int i = 1; i < size; i++) {
+        for (size_t i = 1; i < size; i++) {
             cur_addr++;
             __m512i curv = _mm512_loadu_si512(cur_addr);
             __m512i curc = _mm512_popcnt_epi64(curv);
