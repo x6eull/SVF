@@ -35,19 +35,19 @@ public:
         bool test(size_t index) const noexcept {
             const size_t unit_index = index / UnitBits;
             const size_t bit_index = index % UnitBits;
-            return data[unit_index] & (1u << bit_index);
+            return data[unit_index] & (static_cast<UnitType>(1) << bit_index);
         }
 
         void set(size_t index) noexcept {
             const size_t unit_index = index / UnitBits;
             const size_t bit_index = index % UnitBits;
-            data[unit_index] |= (1u << bit_index);
+            data[unit_index] |= (static_cast<UnitType>(1) << bit_index);
         }
 
         void reset(size_t index) noexcept {
             const size_t unit_index = index / UnitBits;
             const size_t bit_index = index % UnitBits;
-            data[unit_index] &= ~(1u << bit_index);
+            data[unit_index] &= ~(static_cast<UnitType>(1) << bit_index);
         }
 
         bool contains(const Segment& rhs) const noexcept {
