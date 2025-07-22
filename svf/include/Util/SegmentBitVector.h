@@ -61,6 +61,22 @@ public:
         bool operator==(const Segment& rhs) const noexcept {
             return cmpeq<SegmentBits>(data, rhs.data);
         }
+
+        bool operator!=(const Segment& rhs) const noexcept {
+            return !(*this == rhs);
+        }
+
+        bool operator|=(const Segment& rhs) noexcept {
+            return ::or_inplace<SegmentBits>(data, rhs.data);
+        }
+
+        ComposedChangeResult operator&=(const Segment& rhs) noexcept {
+            return ::and_inplace<SegmentBits>(data, rhs.data);
+        }
+
+        ComposedChangeResult operator-=(const Segment& rhs) noexcept {
+            return ::diff_inplace<SegmentBits>(data, rhs.data);
+        }
     } __attribute__((packed));
 
     using indice_t = size_t;
@@ -68,6 +84,10 @@ public:
 protected:
     vector<indice_t> indices;
     vector<Segment> data;
+    /// Returns # of segments.
+    size_t size() const noexcept {
+        return indices.size();
+    }
 
 public:
     class SegmentBitVectorIterator {
@@ -306,6 +326,116 @@ public:
             }
         }
         return false;
+    }
+
+    bool operator==(const SegmentBitVector& rhs) const noexcept {
+        if (indices.size() != rhs.indices.size()) return false;
+        for (size_t i = 0; i < indices.size(); ++i)
+            if (indices[i] != rhs.indices[i] || data[i] != rhs.data[i])
+                return false;
+        return true;
+    }
+
+    bool operator!=(const SegmentBitVector& rhs) const noexcept {
+        return !(*this == rhs);
+    }
+
+    /// Inplace union with rhs.
+    /// Returns true if this set changed.
+    bool operator|=(const SegmentBitVector& rhs) {
+        const auto rhs_size = rhs.size();
+        indices.reserve(rhs_size);
+        data.reserve(rhs_size);
+        size_t this_i = 0, rhs_i = 0;
+        bool changed = false;
+        while (this_i < indices.size() && rhs_i < rhs_size) {
+            const auto this_ind = indices[this_i];
+            const auto rhs_ind = rhs.indices[rhs_i];
+            if (this_ind < rhs_ind) ++this_i;
+            else if (this_ind > rhs_ind) {
+                indices.insert(indices.begin() + this_i, rhs_ind);
+                data.insert(data.begin() + this_i, rhs.data[rhs_i]);
+                ++this_i, ++rhs_i;
+                changed = true;
+            } else {
+                changed |= (data[this_i] |= rhs.data[rhs_i]);
+                ++this_i;
+                ++rhs_i;
+            }
+        }
+        if (rhs_i < rhs_size) {
+            // append remaining elements from rhs
+            indices.insert(indices.end(), rhs.indices.begin() + rhs_i,
+                           rhs.indices.end());
+            data.insert(data.end(), rhs.data.begin() + rhs_i, rhs.data.end());
+            changed = true;
+        }
+        return changed;
+    }
+    /// Inplace intersection with rhs.
+    /// Returns true if this set changed.
+    bool operator&=(const SegmentBitVector& rhs) {
+        bool changed = false;
+        size_t this_i = 0, rhs_i = 0;
+        while (this_i < size() && rhs_i < rhs.size()) {
+            const auto this_ind = indices[this_i];
+            const auto rhs_ind = rhs.indices[rhs_i];
+            if (this_ind < rhs_ind) {
+                indices.erase(indices.begin() + this_i);
+                data.erase(data.begin() + this_i);
+                changed = true;
+            } else if (this_ind > rhs_ind) ++rhs_i;
+            else {
+                const auto [cur_changed, zeroed] =
+                    (data[this_i] &= rhs.data[rhs_i]);
+                changed |= cur_changed;
+                if (zeroed) { // remove empty segment, this_i don't change
+                    indices.erase(indices.begin() + this_i);
+                    data.erase(data.begin() + this_i);
+                } else ++this_i;
+                ++rhs_i;
+            }
+        }
+        if (this_i < size()) {
+            // remove remaining elements from this
+            indices.erase(indices.begin() + this_i, indices.end());
+            data.erase(data.begin() + this_i, data.end());
+            changed = true;
+        }
+        return changed;
+    }
+    /// Inplace difference with rhs.
+    /// Returns true if this set changed.
+    bool operator-=(const SegmentBitVector& rhs) {
+        bool changed = false;
+        size_t this_i = 0, rhs_i = 0;
+        while (this_i < size() && rhs_i < rhs.size()) {
+            const auto this_ind = indices[this_i];
+            const auto rhs_ind = rhs.indices[rhs_i];
+            if (this_ind < rhs_ind) ++this_i;
+            else if (this_ind > rhs_ind) ++rhs_i;
+            else {
+                const auto [cur_changed, zeroed] =
+                    (data[this_i] -= rhs.data[rhs_i]);
+                changed |= cur_changed;
+                if (zeroed) { // remove empty segment, this_i don't change
+                    indices.erase(indices.begin() + this_i);
+                    data.erase(data.begin() + this_i);
+                } else ++this_i;
+                ++rhs_i;
+            }
+        }
+        return changed;
+    }
+    bool intersectWithComplement(const SegmentBitVector& rhs) {
+        return *this -= rhs;
+    }
+
+    bool intersectWithComplement(const SegmentBitVector& lhs,
+                                 const SegmentBitVector& rhs) {
+        // TODO: inefficient!
+        *this = lhs;
+        return intersectWithComplement(rhs);
     }
 };
 } // namespace SVF

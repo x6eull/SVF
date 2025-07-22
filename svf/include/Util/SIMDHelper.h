@@ -117,3 +117,58 @@ inline bool cmpeq(const void* addr1, const void* addr2) {
     __m512i v2 = _mm512_loadu_si512(addr2);
     return _mm512_cmpeq_epi64_mask(v1, v2) == 0xFF;
 }
+
+/// Bitwise OR operation on two memory regions,
+/// stores the result in addr1.
+/// Returns true if any bit in addr1 was changed.
+template <unsigned short BitLength>
+inline bool or_inplace(void* addr1, const void* addr2) {
+    ENSURE_LENGTH(BitLength);
+    static_assert(BitLength == 512 && avx512_enabled,
+                  "FIXME: Implement for other bit length");
+    __m512i v1 = _mm512_loadu_si512(addr1);
+    __m512i v2 = _mm512_loadu_si512(addr2);
+    __m512i r = _mm512_or_si512(v1, v2);
+    __mmask8 unchanged = _mm512_cmpeq_epi64_mask(v1, r);
+    _mm512_storeu_si512(addr1, r);
+    return unchanged != 0xFF;
+}
+
+struct ComposedChangeResult {
+    bool changed;
+    bool zeroed;
+    ComposedChangeResult(bool changed, bool zeroed)
+        : changed(changed | zeroed), zeroed(zeroed) {}
+};
+
+/// Bitwise AND operation on two memory regions,
+/// stores the result in addr1.
+/// Returns whether any bit in addr1 was changed and whether it was zeroed.
+/// v1 and v2 are suppoesed to be both non-zero.
+template <unsigned short BitLength>
+inline ComposedChangeResult and_inplace(void* addr1, const void* addr2) {
+    ENSURE_LENGTH(BitLength);
+    static_assert(BitLength == 512 && avx512_enabled,
+                  "FIXME: Implement for other bit length");
+    __m512i v1 = _mm512_loadu_si512(addr1);
+    __m512i v2 = _mm512_loadu_si512(addr2);
+    __m512i r = _mm512_and_si512(v1, v2);
+    __mmask8 unchanged = _mm512_cmpeq_epi64_mask(v1, r);
+    __mmask8 testz = _mm512_test_epi64_mask(r, r);
+    _mm512_storeu_si512(addr1, r);
+    return ComposedChangeResult(unchanged != 0xFF, testz == 0);
+}
+
+template <unsigned short BitLength>
+inline ComposedChangeResult diff_inplace(void* addr1, const void* addr2) {
+    ENSURE_LENGTH(BitLength);
+    static_assert(BitLength == 512 && avx512_enabled,
+                  "FIXME: Implement for other bit length");
+    __m512i v1 = _mm512_loadu_si512(addr1);
+    __m512i v2 = _mm512_loadu_si512(addr2);
+    __m512i r = _mm512_andnot_epi64(v2, v1); // v1 & ~v2
+    __mmask8 unchanged = _mm512_cmpeq_epi64_mask(v1, r);
+    __mmask8 testz = _mm512_test_epi64_mask(r, r);
+    _mm512_storeu_si512(addr1, r);
+    return ComposedChangeResult(unchanged != 0xFF, testz == 0);
+}
