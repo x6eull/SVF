@@ -357,6 +357,7 @@ const OptionMap<PointsTo::Type> Options::PtType(
     {PointsTo::Type::SBV, "sbv", "sparse bit-vector"},
     {PointsTo::Type::CBV, "cbv", "core bit-vector (dynamic bit-vector without leading and trailing 0s)"},
     {PointsTo::Type::BV, "bv", "bit-vector (dynamic bit-vector without trailing 0s)"},
+    {PointsTo::Type::SEGBV, "segbv", "segment bit-vector (dynamic bit-vector with segments)"},
 }
 );
 
