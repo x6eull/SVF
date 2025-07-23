@@ -9,7 +9,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <immintrin.h>
-#include <popcntintrin.h>
 
 #define sse4_enabled 1
 #define avx256_enabled 1
@@ -90,9 +89,9 @@ inline bool contains(const void* addr1, const void* addr2) {
                   "FIXME: Implement for other bit length");
     __m512i v1 = _mm512_loadu_si512(addr1);
     __m512i v2 = _mm512_loadu_si512(addr2);
-    __m512i r = _mm512_or_si512(v1, v2);
+    __m512i r = _mm512_and_si512(v1, v2);
     __mmask8 cmp = _mm512_cmpeq_epi64_mask(r, v2);
-    return cmp == 0xFF; // all bits in v2 are set in v1
+    return cmp == 0xFF; // v1 & v2 == v2, all bits in v2 are set in v1
 }
 
 /// Returns true if v1 and v2 share any bits.
@@ -104,7 +103,7 @@ inline bool intersects(const void* addr1, const void* addr2) {
     __m512i v1 = _mm512_loadu_si512(addr1);
     __m512i v2 = _mm512_loadu_si512(addr2);
     __m512i r = _mm512_and_si512(v1, v2);
-    // the result is non-zero if they share any bits
+    // result is non-zero if they share any bits
     return _mm512_test_epi64_mask(r, r) != 0;
 }
 
@@ -115,7 +114,8 @@ inline bool cmpeq(const void* addr1, const void* addr2) {
                   "FIXME: Implement for other bit length");
     __m512i v1 = _mm512_loadu_si512(addr1);
     __m512i v2 = _mm512_loadu_si512(addr2);
-    return _mm512_cmpeq_epi64_mask(v1, v2) == 0xFF;
+    __mmask8 eq_mask = _mm512_cmpeq_epi64_mask(v1, v2);
+    return eq_mask == 0xFF;
 }
 
 /// Bitwise OR operation on two memory regions,
@@ -129,9 +129,9 @@ inline bool or_inplace(void* addr1, const void* addr2) {
     __m512i v1 = _mm512_loadu_si512(addr1);
     __m512i v2 = _mm512_loadu_si512(addr2);
     __m512i r = _mm512_or_si512(v1, v2);
-    __mmask8 unchanged = _mm512_cmpeq_epi64_mask(v1, r);
+    __mmask8 eq_mask = _mm512_cmpeq_epi64_mask(v1, r);
     _mm512_storeu_si512(addr1, r);
-    return unchanged != 0xFF;
+    return eq_mask != 0xFF;
 }
 
 struct ComposedChangeResult {
@@ -153,10 +153,10 @@ inline ComposedChangeResult and_inplace(void* addr1, const void* addr2) {
     __m512i v1 = _mm512_loadu_si512(addr1);
     __m512i v2 = _mm512_loadu_si512(addr2);
     __m512i r = _mm512_and_si512(v1, v2);
-    __mmask8 unchanged = _mm512_cmpeq_epi64_mask(v1, r);
+    __mmask8 eq_mask = _mm512_cmpeq_epi64_mask(v1, r);
     __mmask8 testz = _mm512_test_epi64_mask(r, r);
     _mm512_storeu_si512(addr1, r);
-    return ComposedChangeResult(unchanged != 0xFF, testz == 0);
+    return ComposedChangeResult(eq_mask != 0xFF, testz == 0);
 }
 
 template <unsigned short BitLength>
@@ -166,9 +166,9 @@ inline ComposedChangeResult diff_inplace(void* addr1, const void* addr2) {
                   "FIXME: Implement for other bit length");
     __m512i v1 = _mm512_loadu_si512(addr1);
     __m512i v2 = _mm512_loadu_si512(addr2);
-    __m512i r = _mm512_andnot_epi64(v2, v1); // v1 & ~v2
-    __mmask8 unchanged = _mm512_cmpeq_epi64_mask(v1, r);
+    __m512i r = _mm512_andnot_epi64(v2, v1); // ~v2 & v1
+    __mmask8 eq_mask = _mm512_cmpeq_epi64_mask(v1, r);
     __mmask8 testz = _mm512_test_epi64_mask(r, r);
     _mm512_storeu_si512(addr1, r);
-    return ComposedChangeResult(unchanged != 0xFF, testz == 0);
+    return ComposedChangeResult(eq_mask != 0xFF, testz == 0);
 }

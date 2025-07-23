@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "SIMDHelper.h"
+#include "Util/GeneralType.h"
 
 namespace SVF {
 using std::vector;
@@ -18,14 +19,14 @@ public:
     static constexpr size_t SegmentBits = 512;
     static constexpr size_t SegmentSize = SegmentBits / 8;
 
-    using UnitType = unsigned long long;
+    using UnitType = uint64_t;
     static constexpr size_t UnitSize = sizeof(UnitType);
     static constexpr size_t UnitBits = UnitSize * 8;
     static constexpr size_t UnitsPerSegment = SegmentSize / UnitSize;
 
     /// A structure to hold 512 bits
     struct Segment {
-        UnitType data[UnitsPerSegment];
+        UnitType data[UnitsPerSegment]{};
 
         /// Returns true if all bits are zero.
         bool empty() const noexcept {
@@ -163,6 +164,10 @@ public:
             default;
         SegmentBitVectorIterator& operator=(
             const SegmentBitVectorIterator& other) = default;
+        SegmentBitVectorIterator(SegmentBitVectorIterator&& other) noexcept =
+            default;
+        SegmentBitVectorIterator& operator=(
+            SegmentBitVectorIterator&& other) noexcept = default;
 
         reference operator*() const {
             return cur_pos;
@@ -208,30 +213,16 @@ public:
     SegmentBitVector(void) {}
 
     /// Copy constructor
-    SegmentBitVector(const SegmentBitVector& other)
-        : indices(other.indices), data(other.data) {}
+    SegmentBitVector(const SegmentBitVector& other) = default;
 
     /// Move constructor
-    SegmentBitVector(SegmentBitVector&& other) noexcept
-        : indices(std::move(other.indices)), data(std::move(other.data)) {}
+    SegmentBitVector(SegmentBitVector&& other) noexcept = default;
 
     /// Copy assignment
-    SegmentBitVector& operator=(const SegmentBitVector& other) {
-        if (this != &other) {
-            indices = other.indices;
-            data = other.data;
-        }
-        return *this;
-    }
+    SegmentBitVector& operator=(const SegmentBitVector& other) = default;
 
     /// Move assignment
-    SegmentBitVector& operator=(SegmentBitVector&& other) noexcept {
-        if (this != &other) {
-            indices = std::move(other.indices);
-            data = std::move(other.data);
-        }
-        return *this;
-    }
+    SegmentBitVector& operator=(SegmentBitVector&& other) noexcept = default;
 
     /// Returns true if no bits are set.
     bool empty() const noexcept {
@@ -240,7 +231,7 @@ public:
 
     /// Returns the count of set bits.
     uint32_t count() const noexcept {
-        return popcnt<SegmentBits>(data.data(), data.size());
+        return popcnt<SegmentBits>(data.data(), size());
     }
 
     /// Empty the set.
@@ -264,7 +255,7 @@ public:
         size_t i = 0;
         for (; i < indices.size(); ++i) {
             const auto ind = indices[i];
-            if (ind > n) break; // early return
+            if (ind > n) break; // need to insert before this index
             if (n >= ind && n < ind + SegmentBits)
                 return data[i].set(n % SegmentBits);
         }
@@ -275,12 +266,13 @@ public:
 
     bool test_and_set(uint32_t n) noexcept {
         // TODO: improve
-        const auto result = test(n);
+        if (test(n)) return false; // already set
         set(n);
-        return result;
+        return true; // it was not set before
     }
 
     void reset(uint32_t n) noexcept {
+        // TODO binary search
         for (size_t i = 0; i < indices.size(); ++i) {
             const auto ind = indices[i];
             if (ind > n) break; // early return
@@ -290,7 +282,7 @@ public:
                     indices.erase(indices.begin() + i);
                     data.erase(data.begin() + i);
                 }
-                return;
+                break;
             }
         }
     }
@@ -298,40 +290,38 @@ public:
     /// Returns true if this set contains all bits of rhs.
     bool contains(const SegmentBitVector& rhs) const noexcept {
         size_t this_i = 0, rhs_i = 0;
-        while (this_i < indices.size() && rhs_i < rhs.indices.size()) {
+        while (this_i < size() && rhs_i < rhs.size()) {
             const auto this_ind = indices[this_i];
             const auto rhs_ind = rhs.indices[rhs_i];
             if (this_ind > rhs_ind) return false;
             if (this_ind < rhs_ind) ++this_i;
             else {
                 if (!data[this_i].contains(rhs.data[rhs_i])) return false;
-                ++this_i;
-                ++rhs_i;
+                ++this_i, ++rhs_i;
             }
         }
-        return rhs_i == rhs.indices.size();
+        return rhs_i == rhs.size();
     }
 
     /// Returns true if this set and rhs share any bits.
     bool intersects(const SegmentBitVector& rhs) const noexcept {
         size_t this_i = 0, rhs_i = 0;
-        while (this_i < indices.size() && rhs_i < rhs.indices.size()) {
+        while (this_i < size() && rhs_i < rhs.size()) {
             const auto this_ind = indices[this_i];
             const auto rhs_ind = rhs.indices[rhs_i];
             if (this_ind > rhs_ind) ++rhs_i;
             else if (this_ind < rhs_ind) ++this_i;
             else {
                 if (this->data[this_i].intersects(rhs.data[rhs_i])) return true;
-                ++this_i;
-                ++rhs_i;
+                ++this_i, ++rhs_i;
             }
         }
         return false;
     }
 
     bool operator==(const SegmentBitVector& rhs) const noexcept {
-        if (indices.size() != rhs.indices.size()) return false;
-        for (size_t i = 0; i < indices.size(); ++i)
+        if (size() != rhs.size()) return false;
+        for (size_t i = 0; i < size(); ++i)
             if (indices[i] != rhs.indices[i] || data[i] != rhs.data[i])
                 return false;
         return true;
@@ -356,12 +346,11 @@ public:
             else if (this_ind > rhs_ind) {
                 indices.insert(indices.begin() + this_i, rhs_ind);
                 data.insert(data.begin() + this_i, rhs.data[rhs_i]);
-                ++this_i, ++rhs_i;
                 changed = true;
+                ++this_i, ++rhs_i;
             } else {
                 changed |= (data[this_i] |= rhs.data[rhs_i]);
-                ++this_i;
-                ++rhs_i;
+                ++this_i, ++rhs_i;
             }
         }
         if (rhs_i < rhs_size) {
@@ -432,23 +421,17 @@ public:
         return *this -= rhs;
     }
 
-    bool intersectWithComplement(const SegmentBitVector& lhs,
+    void intersectWithComplement(const SegmentBitVector& lhs,
                                  const SegmentBitVector& rhs) {
         // TODO: inefficient!
         *this = lhs;
-        return intersectWithComplement(rhs);
+        intersectWithComplement(rhs);
     }
 
     size_t hash() const noexcept {
-        // TODO: improve
-        size_t h = size();
-        for (const auto& ind : indices)
-            h ^= std::hash<indice_t>()(ind);
-        for (const auto& seg : data)
-            for (size_t i = 0; i < UnitsPerSegment; ++i)
-                h ^= std::hash<UnitType>()(seg.data[i]);
-
-        return h;
+        SVF::Hash<std::pair<std::pair<size_t, size_t>, size_t>> h;
+        return h(std::make_pair(std::make_pair(count(), size()),
+                                size() > 0 ? *begin() : -1));
     }
 };
 } // namespace SVF
