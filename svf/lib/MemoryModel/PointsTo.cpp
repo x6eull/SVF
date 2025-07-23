@@ -376,7 +376,7 @@ PointsTo::PointsToIterator::PointsToIterator(const PointsTo* pt, bool end)
     } else if (pt->type == Type::BV) {
         new (&bvIt) BitVector::iterator(end ? pt->bv.end() : pt->bv.begin());
     } else if (pt->type == Type::SEGBV) {
-        new (&segbvIt) SegmentBitVector::iterator(pt->segbv, end);
+        new (&segbvIt) SegmentBitVector<>::iterator(pt->segbv, end);
     } else {
         assert(false && "PointsToIterator::PointsToIterator: unknown type");
         abort();
@@ -392,7 +392,7 @@ PointsTo::PointsToIterator::PointsToIterator(const PointsToIterator& pt)
     } else if (this->pt->type == PointsTo::Type::BV) {
         new (&bvIt) BitVector::iterator(pt.bvIt);
     } else if (this->pt->type == PointsTo::Type::SEGBV) {
-        new (&segbvIt) SegmentBitVector::iterator(pt.segbvIt);
+        new (&segbvIt) SegmentBitVector<>::iterator(pt.segbvIt);
     } else {
         assert(false && "PointsToIterator::PointsToIterator&: unknown type");
         abort();
@@ -408,7 +408,7 @@ PointsTo::PointsToIterator::PointsToIterator(PointsToIterator&& pt) noexcept
     } else if (this->pt->type == PointsTo::Type::BV) {
         new (&bvIt) BitVector::iterator(std::move(pt.bvIt));
     } else if (this->pt->type == PointsTo::Type::SEGBV) {
-        new (&segbvIt) SegmentBitVector::iterator(std::move(pt.segbvIt));
+        new (&segbvIt) SegmentBitVector<>::iterator(std::move(pt.segbvIt));
     } else {
         assert(false && "PointsToIterator::PointsToIterator&&: unknown type");
         abort();
@@ -426,7 +426,7 @@ PointsTo::PointsToIterator& PointsTo::PointsToIterator::operator=(
     } else if (this->pt->type == PointsTo::Type::BV) {
         new (&bvIt) BitVector::iterator(rhs.bvIt);
     } else if (this->pt->type == PointsTo::Type::SEGBV) {
-        new (&segbvIt) SegmentBitVector::iterator(rhs.segbvIt);
+        new (&segbvIt) SegmentBitVector<>::iterator(rhs.segbvIt);
     } else assert(false && "PointsToIterator::PointsToIterator&: unknown type");
 
     return *this;
@@ -443,7 +443,7 @@ PointsTo::PointsToIterator& PointsTo::PointsToIterator::operator=(
     } else if (this->pt->type == PointsTo::Type::BV) {
         new (&bvIt) BitVector::iterator(std::move(rhs.bvIt));
     } else if (this->pt->type == PointsTo::Type::SEGBV) {
-        new (&segbvIt) SegmentBitVector::iterator(std::move(rhs.segbvIt));
+        new (&segbvIt) SegmentBitVector<>::iterator(std::move(rhs.segbvIt));
     } else
         assert(false && "PointsToIterator::PointsToIterator&&: unknown type");
 

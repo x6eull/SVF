@@ -11,20 +11,18 @@
 
 namespace SVF {
 using std::vector;
-class SegmentBitVector {
+template <size_t SegmentBits = 128> class SegmentBitVector {
     friend class SVFIRWriter;
     friend class SVFIRReader;
 
 public:
-    static constexpr size_t SegmentBits = 512;
     static constexpr size_t SegmentSize = SegmentBits / 8;
 
     using UnitType = uint64_t;
     static constexpr size_t UnitSize = sizeof(UnitType);
     static constexpr size_t UnitBits = UnitSize * 8;
     static constexpr size_t UnitsPerSegment = SegmentSize / UnitSize;
-
-    /// A structure to hold 512 bits
+ 
     struct Segment {
         UnitType data[UnitsPerSegment]{};
 

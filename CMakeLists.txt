@@ -14,7 +14,6 @@ project(
 
 # Export compile commands for clangd & IDE support
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -march=native")
 
 # Set SVF's default C/C++ standards (C11/C++17)
 set(CMAKE_C_STANDARD 11)
@@ -231,6 +230,16 @@ message(
 
 # Define an interface library which contains publically exposed properties/flags/defs
 add_library(SvfFlags INTERFACE)
+
+target_compile_options(
+  SvfFlags
+  INTERFACE -march=native
+  INTERFACE $<$<CONFIG:Release>:-O2>
+  INTERFACE $<$<CONFIG:Debug>:-O0>
+)
+# keep assertations in Release mode
+string(REPLACE "/DNDEBUG" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+string(REPLACE "-DNDEBUG" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
 
 # Set the C++ standard as a public required feature
 target_compile_features(SvfFlags INTERFACE c_std_11 cxx_std_17)

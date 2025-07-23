@@ -171,7 +171,7 @@ private:
         /// Bit vector backing.
         BitVector bv;
         /// Segment bit vector backing.
-        SegmentBitVector segbv;
+        SegmentBitVector<> segbv;
     };
 
     /// Type of this points-to set.
@@ -231,7 +231,7 @@ public:
             SparseBitVector<>::iterator sbvIt;
             CoreBitVector::iterator cbvIt;
             BitVector::iterator bvIt;
-            SegmentBitVector::iterator segbvIt;
+            SegmentBitVector<>::iterator segbvIt;
         };
     };
 };
