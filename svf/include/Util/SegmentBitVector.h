@@ -10,7 +10,6 @@
 #include "Util/GeneralType.h"
 
 namespace SVF {
-using std::vector;
 template <size_t SegmentBits = 128> class SegmentBitVector {
     friend class SVFIRWriter;
     friend class SVFIRReader;
@@ -91,30 +90,65 @@ public:
         }
     } __attribute__((packed));
 
-    using indice_t = size_t;
+    using index_t = size_t;
 
 protected:
-    vector<indice_t> indices;
-    vector<Segment> data;
+    std::vector<index_t> indexes;
+    std::vector<Segment> data;
     /// Returns # of segments.
     inline __attribute__((always_inline)) size_t size() const noexcept {
-        return indices.size();
+        return indexes.size();
+    }
+    inline __attribute__((always_inline)) index_t
+    index_at(size_t i) const noexcept {
+        return indexes[i];
+    }
+    inline __attribute__((always_inline)) Segment& data_at(size_t i) noexcept {
+        return data[i];
+    }
+    inline __attribute__((always_inline)) const Segment& data_at(
+        size_t i) const noexcept {
+        return data[i];
+    }
+    inline __attribute__((always_inline)) void erase_at(size_t i) noexcept {
+        indexes.erase(indexes.begin() + i);
+        data.erase(data.begin() + i);
+    }
+    inline __attribute__((always_inline)) void erase_till_end(
+        size_t start) noexcept {
+        indexes.erase(indexes.begin() + start, indexes.end());
+        data.erase(data.begin() + start, data.end());
+    }
+    template <typename... Args>
+    inline __attribute__((always_inline)) void emplace_at(
+        size_t i, const index_t& ind, Args&&... seg) noexcept {
+        indexes.emplace(indexes.begin() + i, ind);
+        data.emplace(data.begin() + i, std::forward<Args>(seg)...);
+    }
+    inline __attribute__((always_inline)) void insert_many(
+        size_t this_offset, const SegmentBitVector rhs, size_t other_offset,
+        size_t count) noexcept {
+        indexes.insert(indexes.begin() + this_offset,
+                       rhs.indexes.begin() + other_offset,
+                       rhs.indexes.begin() + other_offset + count);
+        data.insert(data.begin() + this_offset, rhs.data.begin() + other_offset,
+                    rhs.data.begin() + other_offset + count);
     }
 
 public:
     class SegmentBitVectorIterator {
     public:
         using iterator_category = std::input_iterator_tag;
-        using value_type = indice_t;
+        using value_type = index_t;
         using difference_type = std::ptrdiff_t;
-        using pointer = const indice_t*;
-        using reference = const indice_t&;
-        indice_t cur_pos;
+        using pointer = const index_t*;
+        using reference = const index_t&;
+        index_t cur_pos;
 
     protected:
-        typename vector<indice_t>::const_iterator indicesIt;
-        typename vector<indice_t>::const_iterator indicesEnd;
-        typename vector<Segment>::const_iterator dataIt;
+        typename std::vector<index_t>::const_iterator indexesIt;
+        typename std::vector<index_t>::const_iterator indexesEnd;
+        typename std::vector<Segment>::const_iterator dataIt;
         unsigned char unit_index; // unit index in the current segment
         unsigned char bit_index;  // bit index in the current unit
         bool end;
@@ -124,8 +158,8 @@ public:
             if (++unit_index == UnitsPerSegment) {
                 // forward to next segment
                 unit_index = 0;
-                ++indicesIt, ++dataIt;
-                if (indicesIt == indicesEnd) {
+                ++indexesIt, ++dataIt;
+                if (indexesIt == indexesEnd) {
                     // reached the end
                     end = true;
                 }
@@ -147,7 +181,7 @@ public:
                 if (tz_count < UnitBits) {
                     // found a set bit
                     bit_index = tz_count;
-                    cur_pos = *indicesIt + unit_index * UnitBits + bit_index;
+                    cur_pos = *indexesIt + unit_index * UnitBits + bit_index;
                     return;
                 } else // move to next unit
                     incr_unit();
@@ -163,9 +197,9 @@ public:
         SegmentBitVectorIterator() = delete;
         SegmentBitVectorIterator(const SegmentBitVector& vec, bool end = false)
             : // must be init to identify raw vector
-              indicesEnd(vec.indices.end()), end(end | vec.empty()) {
+              indexesEnd(vec.indexes.end()), end(end | vec.empty()) {
             if (end) return;
-            indicesIt = vec.indices.begin();
+            indexesIt = vec.indexes.begin();
             dataIt = vec.data.begin();
             unit_index = 0;
             bit_index = 0;
@@ -198,7 +232,7 @@ public:
         bool operator==(const SegmentBitVectorIterator& other) const {
             return
                 // created from the same SegmentBitVector, and
-                indicesEnd == other.indicesEnd &&
+                indexesEnd == other.indexesEnd &&
                 (( // both ended, or
                      end && other.end) ||
                  ( // both not ended and pointing to the same position
@@ -237,7 +271,7 @@ public:
 
     /// Returns true if no bits are set.
     bool empty() const noexcept {
-        return indices.empty();
+        return indexes.empty();
     }
 
     /// Returns the count of set bits.
@@ -247,17 +281,17 @@ public:
 
     /// Empty the set.
     void clear() noexcept {
-        indices.clear();
+        indexes.clear();
         data.clear();
     }
 
     /// Returns true if n is in this set.
     bool test(uint32_t n) const noexcept {
-        for (size_t i = 0; i < indices.size(); ++i) {
-            const auto ind = indices[i];
+        for (size_t i = 0; i < size(); ++i) {
+            const auto ind = index_at(i);
             if (ind > n) break; // early return
             if (n >= ind && n < ind + SegmentBits)
-                return data[i].test(n % SegmentBits);
+                return data_at(i).test(n % SegmentBits);
         }
         return false;
     }
@@ -265,40 +299,36 @@ public:
     void set(uint32_t n) noexcept {
         // TODO binary search
         size_t i = 0;
-        for (; i < indices.size(); ++i) {
-            const auto ind = indices[i];
+        for (; i < size(); ++i) {
+            const auto ind = index_at(i);
             if (ind > n) break; // need to insert before this index
             if (n >= ind && n < ind + SegmentBits)
-                return data[i].set(n % SegmentBits);
+                return data_at(i).set(n % SegmentBits);
         }
-        indices.emplace(indices.begin() + i, n - (n % SegmentBits));
-        data.emplace(data.begin() + i, n % SegmentBits);
+        emplace_at(i, n - (n % SegmentBits), n % SegmentBits);
     }
 
     bool test_and_set(uint32_t n) noexcept {
         size_t i = 0;
-        for (; i < indices.size(); ++i) {
-            const auto ind = indices[i];
+        for (; i < size(); ++i) {
+            const auto ind = index_at(i);
             if (ind > n) break; // need to insert before this index
             if (n >= ind && n < ind + SegmentBits)
-                return data[i].test_and_set(n % SegmentBits);
+                return data_at(i).test_and_set(n % SegmentBits);
         }
-        indices.emplace(indices.begin() + i, n - (n % SegmentBits));
-        data.emplace(data.begin() + i, n % SegmentBits);
+        emplace_at(i, n - (n % SegmentBits), n % SegmentBits);
         return true;
     }
 
     void reset(uint32_t n) noexcept {
         // TODO binary search
-        for (size_t i = 0; i < indices.size(); ++i) {
-            const auto ind = indices[i];
+        for (size_t i = 0; i < size(); ++i) {
+            const auto ind = index_at(i);
             if (ind > n) break; // early return
             if (n >= ind && n < ind + SegmentBits) {
-                data[i].reset(n % SegmentBits);
-                if (data[i].empty()) { // this segment is empty, remove it
-                    indices.erase(indices.begin() + i);
-                    data.erase(data.begin() + i);
-                }
+                const auto& d = data_at(i);
+                d.reset(n % SegmentBits);
+                if (d.empty()) erase_at(i); // this segment is empty, remove it
                 break;
             }
         }
@@ -308,12 +338,12 @@ public:
     bool contains(const SegmentBitVector& rhs) const noexcept {
         size_t this_i = 0, rhs_i = 0;
         while (this_i < size() && rhs_i < rhs.size()) {
-            const auto this_ind = indices[this_i];
-            const auto rhs_ind = rhs.indices[rhs_i];
+            const auto this_ind = index_at(this_i);
+            const auto rhs_ind = rhs.index_at(rhs_i);
             if (this_ind > rhs_ind) return false;
             if (this_ind < rhs_ind) ++this_i;
             else {
-                if (!data[this_i].contains(rhs.data[rhs_i])) return false;
+                if (!data_at(this_i).contains(rhs.data_at(rhs_i))) return false;
                 ++this_i, ++rhs_i;
             }
         }
@@ -324,12 +354,13 @@ public:
     bool intersects(const SegmentBitVector& rhs) const noexcept {
         size_t this_i = 0, rhs_i = 0;
         while (this_i < size() && rhs_i < rhs.size()) {
-            const auto this_ind = indices[this_i];
-            const auto rhs_ind = rhs.indices[rhs_i];
+            const auto this_ind = index_at(this_i);
+            const auto rhs_ind = rhs.index_at(rhs_i);
             if (this_ind > rhs_ind) ++rhs_i;
             else if (this_ind < rhs_ind) ++this_i;
             else {
-                if (this->data[this_i].intersects(rhs.data[rhs_i])) return true;
+                if (this->data_at(this_i).intersects(rhs.data_at(rhs_i)))
+                    return true;
                 ++this_i, ++rhs_i;
             }
         }
@@ -339,7 +370,8 @@ public:
     bool operator==(const SegmentBitVector& rhs) const noexcept {
         if (size() != rhs.size()) return false;
         for (size_t i = 0; i < size(); ++i)
-            if (indices[i] != rhs.indices[i] || data[i] != rhs.data[i])
+            if (index_at(i) != rhs.index_at(i) ||
+                data_at(i) != rhs.data_at(i))
                 return false;
         return true;
     }
@@ -352,29 +384,26 @@ public:
     /// Returns true if this set changed.
     bool operator|=(const SegmentBitVector& rhs) {
         const auto rhs_size = rhs.size();
-        indices.reserve(rhs_size);
+        indexes.reserve(rhs_size);
         data.reserve(rhs_size);
         size_t this_i = 0, rhs_i = 0;
         bool changed = false;
-        while (this_i < indices.size() && rhs_i < rhs_size) {
-            const auto this_ind = indices[this_i];
-            const auto rhs_ind = rhs.indices[rhs_i];
+        while (this_i < size() && rhs_i < rhs_size) {
+            const auto this_ind = index_at(this_i);
+            const auto rhs_ind = rhs.index_at(rhs_i);
             if (this_ind < rhs_ind) ++this_i;
             else if (this_ind > rhs_ind) {
-                indices.insert(indices.begin() + this_i, rhs_ind);
-                data.insert(data.begin() + this_i, rhs.data[rhs_i]);
+                emplace_at(this_i, rhs_ind, rhs.data_at(rhs_i));
                 changed = true;
                 ++this_i, ++rhs_i;
             } else {
-                changed |= (data[this_i] |= rhs.data[rhs_i]);
+                changed |= (data_at(this_i) |= rhs.data_at(rhs_i));
                 ++this_i, ++rhs_i;
             }
         }
         if (rhs_i < rhs_size) {
             // append remaining elements from rhs
-            indices.insert(indices.end(), rhs.indices.begin() + rhs_i,
-                           rhs.indices.end());
-            data.insert(data.end(), rhs.data.begin() + rhs_i, rhs.data.end());
+            insert_many(size(), rhs, rhs_i, rhs_size - rhs_i);
             changed = true;
         }
         return changed;
@@ -385,28 +414,24 @@ public:
         bool changed = false;
         size_t this_i = 0, rhs_i = 0;
         while (this_i < size() && rhs_i < rhs.size()) {
-            const auto this_ind = indices[this_i];
-            const auto rhs_ind = rhs.indices[rhs_i];
+            const auto this_ind = index_at(this_i);
+            const auto rhs_ind = rhs.index_at(rhs_i);
             if (this_ind < rhs_ind) {
-                indices.erase(indices.begin() + this_i);
-                data.erase(data.begin() + this_i);
+                erase_at(this_i);
                 changed = true;
             } else if (this_ind > rhs_ind) ++rhs_i;
             else {
                 const auto [cur_changed, zeroed] =
-                    (data[this_i] &= rhs.data[rhs_i]);
+                    (data_at(this_i) &= rhs.data_at(rhs_i));
                 changed |= cur_changed;
-                if (zeroed) { // remove empty segment, this_i don't change
-                    indices.erase(indices.begin() + this_i);
-                    data.erase(data.begin() + this_i);
-                } else ++this_i;
+                if (zeroed) erase_at(this_i); // remove empty segment
+                else ++this_i;
                 ++rhs_i;
             }
         }
         if (this_i < size()) {
             // remove remaining elements from this
-            indices.erase(indices.begin() + this_i, indices.end());
-            data.erase(data.begin() + this_i, data.end());
+            erase_till_end(this_i);
             changed = true;
         }
         return changed;
@@ -417,18 +442,16 @@ public:
         bool changed = false;
         size_t this_i = 0, rhs_i = 0;
         while (this_i < size() && rhs_i < rhs.size()) {
-            const auto this_ind = indices[this_i];
-            const auto rhs_ind = rhs.indices[rhs_i];
+            const auto this_ind = index_at(this_i);
+            const auto rhs_ind = rhs.index_at(rhs_i);
             if (this_ind < rhs_ind) ++this_i;
             else if (this_ind > rhs_ind) ++rhs_i;
             else {
                 const auto [cur_changed, zeroed] =
-                    (data[this_i] -= rhs.data[rhs_i]);
+                    (data_at(this_i) -= rhs.data_at(rhs_i));
                 changed |= cur_changed;
-                if (zeroed) { // remove empty segment, this_i don't change
-                    indices.erase(indices.begin() + this_i);
-                    data.erase(data.begin() + this_i);
-                } else ++this_i;
+                if (zeroed) erase_at(this_i); // remove empty segment,
+                else ++this_i;
                 ++rhs_i;
             }
         }

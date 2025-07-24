@@ -162,6 +162,14 @@ _inline uint32_t popcnt(const void* addr, size_t size) {
     }
     return avx_vec<BitLength>::reduce_add(c);
 }
+template <> _inline uint32_t popcnt<64>(const void* addr, size_t size) {
+    uint32_t result = 0;
+    auto arr = reinterpret_cast<const uint64_t*>(addr);
+    for (size_t i = 0; i < size; ++i, ++arr) {
+        result += _mm_popcnt_u64(*arr);
+    }
+    return result;
+}
 
 /// Returns true if all bits in v2 are set in v1. (that is, v1 contains v2)
 template <unsigned short BitLength>
