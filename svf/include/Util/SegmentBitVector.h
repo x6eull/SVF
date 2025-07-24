@@ -20,11 +20,11 @@ public:
     static constexpr size_t UnitsPerSegment = SegmentBits / UnitBits;
 
     struct Segment {
-        UnitType data[UnitsPerSegment]{};
+        UnitType data[UnitsPerSegment];
 
         Segment() = default;
         /// Initialize segment with only one bit set.
-        Segment(size_t index) {
+        Segment(size_t index) : data{} {
             set(index);
         }
 
@@ -89,15 +89,18 @@ public:
             return ::diff_inplace<SegmentBits>(data, rhs.data);
         }
     } __attribute__((packed));
+    static_assert(sizeof(Segment) == SegmentBits / 8);
 
     using index_t = size_t;
-    struct alignas(8) IndexedSegment {
+    struct IndexedSegment {
         index_t index;
         Segment data;
 
-        IndexedSegment(index_t index, Segment data)
-            : index(index), data(data) {}
-    } __attribute__((packed));
+        IndexedSegment() = default;
+        template <typename... Args>
+        IndexedSegment(index_t index, Args&&... seg)
+            : index(index), data(std::forward<Args>(seg)...) {}
+    };
 
 protected:
     // std::vector<index_t> indexes;
@@ -121,21 +124,20 @@ protected:
     inline __attribute__((always_inline)) void erase_at(size_t i) noexcept {
         values.erase(values.begin() + i);
     }
-    inline __attribute__((always_inline)) void erase_till_end(
-        size_t start) noexcept {
-        values.erase(values.begin() + start, values.end());
+    inline __attribute__((always_inline)) void truncate(
+        size_t keep_count) noexcept {
+        values.resize(keep_count);
     }
     template <typename... Args>
     inline __attribute__((always_inline)) void emplace_at(
         size_t i, const index_t& ind, Args&&... seg) noexcept {
         values.emplace(values.begin() + i, ind, std::forward<Args>(seg)...);
     }
-    inline __attribute__((always_inline)) void insert_many(
-        size_t this_offset, const SegmentBitVector rhs, size_t other_offset,
-        size_t count) noexcept {
+    inline __attribute__((always_inline)) void insert_till_end(
+        size_t this_offset, const SegmentBitVector rhs,
+        size_t other_offset) noexcept {
         values.insert(values.begin() + this_offset,
-                      rhs.values.begin() + other_offset,
-                      rhs.values.begin() + other_offset + count);
+                      rhs.values.begin() + other_offset, rhs.values.end());
     }
 
 public:
@@ -297,45 +299,47 @@ public:
 
     /// Returns true if n is in this set.
     bool test(uint32_t n) const noexcept {
+        const auto target_ind = n - (n % SegmentBits);
         for (size_t i = 0; i < size(); ++i) {
             const auto ind = index_at(i);
             if (ind > n) break; // early return
-            if (n >= ind && n < ind + SegmentBits)
-                return data_at(i).test(n % SegmentBits);
+            if (ind == target_ind) return data_at(i).test(n % SegmentBits);
         }
         return false;
     }
 
     void set(uint32_t n) noexcept {
-        // TODO binary search
+        // TODO binary search?
         size_t i = 0;
+        const auto target_ind = n - (n % SegmentBits);
         for (; i < size(); ++i) {
             const auto ind = index_at(i);
             if (ind > n) break; // need to insert before this index
-            if (n >= ind && n < ind + SegmentBits)
-                return data_at(i).set(n % SegmentBits);
+            if (ind == target_ind) return data_at(i).set(n % SegmentBits);
         }
-        emplace_at(i, n - (n % SegmentBits), n % SegmentBits);
+        emplace_at(i, target_ind, n % SegmentBits);
     }
 
     bool test_and_set(uint32_t n) noexcept {
         size_t i = 0;
+        const auto target_ind = n - (n % SegmentBits);
         for (; i < size(); ++i) {
             const auto ind = index_at(i);
             if (ind > n) break; // need to insert before this index
-            if (n >= ind && n < ind + SegmentBits)
+            if (ind == target_ind)
                 return data_at(i).test_and_set(n % SegmentBits);
         }
-        emplace_at(i, n - (n % SegmentBits), n % SegmentBits);
+        emplace_at(i, target_ind, n % SegmentBits);
         return true;
     }
 
     void reset(uint32_t n) noexcept {
-        // TODO binary search
+        // TODO binary search?
+        const auto target_ind = n - (n % SegmentBits);
         for (size_t i = 0; i < size(); ++i) {
             const auto ind = index_at(i);
             if (ind > n) break; // early return
-            if (n >= ind && n < ind + SegmentBits) {
+            if (ind == target_ind) {
                 auto& d = data_at(i);
                 d.reset(n % SegmentBits);
                 if (d.empty()) erase_at(i); // this segment is empty, remove it
@@ -400,6 +404,7 @@ public:
             const auto rhs_ind = rhs.index_at(rhs_i);
             if (this_ind < rhs_ind) ++this_i;
             else if (this_ind > rhs_ind) {
+                // copy current rhs segment to this
                 emplace_at(this_i, rhs_ind, rhs.data_at(rhs_i));
                 changed = true;
                 ++this_i, ++rhs_i;
@@ -410,7 +415,7 @@ public:
         }
         if (rhs_i < rhs_size) {
             // append remaining elements from rhs
-            insert_many(size(), rhs, rhs_i, rhs_size - rhs_i);
+            insert_till_end(size(), rhs, rhs_i);
             changed = true;
         }
         return changed;
@@ -438,7 +443,7 @@ public:
         }
         if (this_i < size()) {
             // remove remaining elements from this
-            erase_till_end(this_i);
+            truncate(this_i);
             changed = true;
         }
         return changed;
@@ -457,7 +462,7 @@ public:
                 const auto [cur_changed, zeroed] =
                     (data_at(this_i) -= rhs.data_at(rhs_i));
                 changed |= cur_changed;
-                if (zeroed) erase_at(this_i); // remove empty segment,
+                if (zeroed) erase_at(this_i); // remove empty segment
                 else ++this_i;
                 ++rhs_i;
             }
