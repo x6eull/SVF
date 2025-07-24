@@ -16,15 +16,18 @@ template <size_t SegmentBits = 128> class SegmentBitVector {
     friend class SVFIRReader;
 
 public:
-    static constexpr size_t SegmentSize = SegmentBits / 8;
-
     using UnitType = uint64_t;
-    static constexpr size_t UnitSize = sizeof(UnitType);
-    static constexpr size_t UnitBits = UnitSize * 8;
-    static constexpr size_t UnitsPerSegment = SegmentSize / UnitSize;
- 
+    static constexpr size_t UnitBits = sizeof(UnitType) * 8;
+    static constexpr size_t UnitsPerSegment = SegmentBits / UnitBits;
+
     struct Segment {
         UnitType data[UnitsPerSegment]{};
+
+        Segment() = default;
+        /// Initialize segment with only one bit set.
+        Segment(size_t index) {
+            set(index);
+        }
 
         /// Returns true if all bits are zero.
         bool empty() const noexcept {
@@ -41,6 +44,16 @@ public:
             const size_t unit_index = index / UnitBits;
             const size_t bit_index = index % UnitBits;
             data[unit_index] |= (static_cast<UnitType>(1) << bit_index);
+        }
+
+        /// Returns true if the bit was not set before, and set it.
+        bool test_and_set(size_t index) noexcept {
+            const size_t unit_index = index / UnitBits;
+            const size_t bit_index = index % UnitBits;
+            const auto mask = static_cast<UnitType>(1) << bit_index;
+            if (data[unit_index] & mask) return false; // already set
+            data[unit_index] |= mask;                  // set the bit
+            return true;                               // it was not set before
         }
 
         void reset(size_t index) noexcept {
@@ -84,7 +97,7 @@ protected:
     vector<indice_t> indices;
     vector<Segment> data;
     /// Returns # of segments.
-    size_t size() const noexcept {
+    inline __attribute__((always_inline)) size_t size() const noexcept {
         return indices.size();
     }
 
@@ -250,6 +263,7 @@ public:
     }
 
     void set(uint32_t n) noexcept {
+        // TODO binary search
         size_t i = 0;
         for (; i < indices.size(); ++i) {
             const auto ind = indices[i];
@@ -258,15 +272,20 @@ public:
                 return data[i].set(n % SegmentBits);
         }
         indices.emplace(indices.begin() + i, n - (n % SegmentBits));
-        data.emplace(data.begin() + i);
-        return data[i].set(n % SegmentBits);
+        data.emplace(data.begin() + i, n % SegmentBits);
     }
 
     bool test_and_set(uint32_t n) noexcept {
-        // TODO: improve
-        if (test(n)) return false; // already set
-        set(n);
-        return true; // it was not set before
+        size_t i = 0;
+        for (; i < indices.size(); ++i) {
+            const auto ind = indices[i];
+            if (ind > n) break; // need to insert before this index
+            if (n >= ind && n < ind + SegmentBits)
+                return data[i].test_and_set(n % SegmentBits);
+        }
+        indices.emplace(indices.begin() + i, n - (n % SegmentBits));
+        data.emplace(data.begin() + i, n % SegmentBits);
+        return true;
     }
 
     void reset(uint32_t n) noexcept {
