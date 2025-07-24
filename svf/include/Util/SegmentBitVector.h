@@ -91,48 +91,51 @@ public:
     } __attribute__((packed));
 
     using index_t = size_t;
+    struct alignas(8) IndexedSegment {
+        index_t index;
+        Segment data;
+
+        IndexedSegment(index_t index, Segment data)
+            : index(index), data(data) {}
+    } __attribute__((packed));
 
 protected:
-    std::vector<index_t> indexes;
-    std::vector<Segment> data;
+    // std::vector<index_t> indexes;
+    // std::vector<Segment> data;
+    std::vector<IndexedSegment> values;
     /// Returns # of segments.
     inline __attribute__((always_inline)) size_t size() const noexcept {
-        return indexes.size();
+        return values.size();
     }
     inline __attribute__((always_inline)) index_t
     index_at(size_t i) const noexcept {
-        return indexes[i];
+        return values[i].index;
     }
     inline __attribute__((always_inline)) Segment& data_at(size_t i) noexcept {
-        return data[i];
+        return values[i].data;
     }
     inline __attribute__((always_inline)) const Segment& data_at(
         size_t i) const noexcept {
-        return data[i];
+        return values[i].data;
     }
     inline __attribute__((always_inline)) void erase_at(size_t i) noexcept {
-        indexes.erase(indexes.begin() + i);
-        data.erase(data.begin() + i);
+        values.erase(values.begin() + i);
     }
     inline __attribute__((always_inline)) void erase_till_end(
         size_t start) noexcept {
-        indexes.erase(indexes.begin() + start, indexes.end());
-        data.erase(data.begin() + start, data.end());
+        values.erase(values.begin() + start, values.end());
     }
     template <typename... Args>
     inline __attribute__((always_inline)) void emplace_at(
         size_t i, const index_t& ind, Args&&... seg) noexcept {
-        indexes.emplace(indexes.begin() + i, ind);
-        data.emplace(data.begin() + i, std::forward<Args>(seg)...);
+        values.emplace(values.begin() + i, ind, std::forward<Args>(seg)...);
     }
     inline __attribute__((always_inline)) void insert_many(
         size_t this_offset, const SegmentBitVector rhs, size_t other_offset,
         size_t count) noexcept {
-        indexes.insert(indexes.begin() + this_offset,
-                       rhs.indexes.begin() + other_offset,
-                       rhs.indexes.begin() + other_offset + count);
-        data.insert(data.begin() + this_offset, rhs.data.begin() + other_offset,
-                    rhs.data.begin() + other_offset + count);
+        values.insert(values.begin() + this_offset,
+                      rhs.values.begin() + other_offset,
+                      rhs.values.begin() + other_offset + count);
     }
 
 public:
@@ -146,9 +149,8 @@ public:
         index_t cur_pos;
 
     protected:
-        typename std::vector<index_t>::const_iterator indexesIt;
-        typename std::vector<index_t>::const_iterator indexesEnd;
-        typename std::vector<Segment>::const_iterator dataIt;
+        typename std::vector<IndexedSegment>::const_iterator valueIt;
+        typename std::vector<IndexedSegment>::const_iterator valueEnd;
         unsigned char unit_index; // unit index in the current segment
         unsigned char bit_index;  // bit index in the current unit
         bool end;
@@ -158,11 +160,10 @@ public:
             if (++unit_index == UnitsPerSegment) {
                 // forward to next segment
                 unit_index = 0;
-                ++indexesIt, ++dataIt;
-                if (indexesIt == indexesEnd) {
+                ++valueIt;
+                if (valueIt == valueEnd)
                     // reached the end
                     end = true;
-                }
             }
         }
         /// Increment the bit index (mark the current bit as visited).
@@ -176,12 +177,13 @@ public:
         void search() {
             while (!end) {
                 auto mask = ~((static_cast<UnitType>(1) << bit_index) - 1);
-                auto masked_unit = dataIt->data[unit_index] & mask;
+                auto masked_unit = valueIt->data.data[unit_index] & mask;
                 auto tz_count = __tzcnt_u64(masked_unit);
                 if (tz_count < UnitBits) {
                     // found a set bit
                     bit_index = tz_count;
-                    cur_pos = *indexesIt + unit_index * UnitBits + bit_index;
+                    cur_pos =
+                        valueIt->index + unit_index * UnitBits + bit_index;
                     return;
                 } else // move to next unit
                     incr_unit();
@@ -197,10 +199,9 @@ public:
         SegmentBitVectorIterator() = delete;
         SegmentBitVectorIterator(const SegmentBitVector& vec, bool end = false)
             : // must be init to identify raw vector
-              indexesEnd(vec.indexes.end()), end(end | vec.empty()) {
+              valueEnd(vec.values.end()), end(end | vec.empty()) {
             if (end) return;
-            indexesIt = vec.indexes.begin();
-            dataIt = vec.data.begin();
+            valueIt = vec.values.begin();
             unit_index = 0;
             bit_index = 0;
             search();
@@ -232,7 +233,7 @@ public:
         bool operator==(const SegmentBitVectorIterator& other) const {
             return
                 // created from the same SegmentBitVector, and
-                indexesEnd == other.indexesEnd &&
+                valueEnd == other.valueEnd &&
                 (( // both ended, or
                      end && other.end) ||
                  ( // both not ended and pointing to the same position
@@ -271,18 +272,27 @@ public:
 
     /// Returns true if no bits are set.
     bool empty() const noexcept {
-        return indexes.empty();
+        return values.empty();
     }
 
     /// Returns the count of set bits.
     uint32_t count() const noexcept {
-        return popcnt<SegmentBits>(data.data(), size());
+        // TODO: improve
+        if (size() == 0) return 0;
+        auto it = values.begin();
+        const auto v0 = avx_vec<SegmentBits>::load(&(it->data));
+        auto c = avx_vec<SegmentBits>::popcnt(v0);
+        for (size_t i = 1; i < size(); i++, it++) {
+            const auto curv = avx_vec<SegmentBits>::load(&(it->data));
+            const auto curc = avx_vec<SegmentBits>::popcnt(curv);
+            c = avx_vec<SegmentBits>::add_op(c, curc);
+        }
+        return avx_vec<SegmentBits>::reduce_add(c);
     }
 
     /// Empty the set.
     void clear() noexcept {
-        indexes.clear();
-        data.clear();
+        values.clear();
     }
 
     /// Returns true if n is in this set.
@@ -326,7 +336,7 @@ public:
             const auto ind = index_at(i);
             if (ind > n) break; // early return
             if (n >= ind && n < ind + SegmentBits) {
-                const auto& d = data_at(i);
+                auto& d = data_at(i);
                 d.reset(n % SegmentBits);
                 if (d.empty()) erase_at(i); // this segment is empty, remove it
                 break;
@@ -369,11 +379,9 @@ public:
 
     bool operator==(const SegmentBitVector& rhs) const noexcept {
         if (size() != rhs.size()) return false;
-        for (size_t i = 0; i < size(); ++i)
-            if (index_at(i) != rhs.index_at(i) ||
-                data_at(i) != rhs.data_at(i))
-                return false;
-        return true;
+        return cmpeq(reinterpret_cast<const uint64_t*>(this->values.data()),
+                     reinterpret_cast<const uint64_t*>(rhs.values.data()),
+                     sizeof(IndexedSegment) / 8 * size());
     }
 
     bool operator!=(const SegmentBitVector& rhs) const noexcept {
@@ -384,8 +392,7 @@ public:
     /// Returns true if this set changed.
     bool operator|=(const SegmentBitVector& rhs) {
         const auto rhs_size = rhs.size();
-        indexes.reserve(rhs_size);
-        data.reserve(rhs_size);
+        values.reserve(rhs_size);
         size_t this_i = 0, rhs_i = 0;
         bool changed = false;
         while (this_i < size() && rhs_i < rhs_size) {

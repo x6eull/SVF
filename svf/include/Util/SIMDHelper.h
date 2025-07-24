@@ -148,13 +148,13 @@ template <unsigned short BitLength> _inline bool testz(const void* addr) {
 
 /// Count bits set(logical 1) in a contiguous memory region.
 template <unsigned short BitLength>
-_inline uint32_t popcnt(const void* addr, size_t size) {
-    if (size == 0) return 0;
+_inline uint32_t popcnt(const void* addr, size_t count) {
+    if (count == 0) return 0;
     const auto v0 = avx_vec<BitLength>::load(addr);
     auto c = avx_vec<BitLength>::popcnt(v0);
     const auto* cur_addr =
         reinterpret_cast<const typename avx_vec<BitLength>::data_t*>(addr);
-    for (size_t i = 1; i < size; i++) {
+    for (size_t i = 1; i < count; i++) {
         cur_addr++;
         const auto curv = avx_vec<BitLength>::load(cur_addr);
         const auto curc = avx_vec<BitLength>::popcnt(curv);
@@ -194,6 +194,26 @@ _inline bool cmpeq(const void* addr1, const void* addr2) {
     const auto v1 = avx_vec<BitLength>::load(addr1);
     const auto v2 = avx_vec<BitLength>::load(addr2);
     return avx_vec<BitLength>::eq_cmp(v1, v2);
+}
+
+_inline bool cmpeq(const uint64_t* addr1, const uint64_t* addr2,
+                   const size_t size_i64) {
+    size_t i = 0;
+    for (; size_i64 >= i + 8; i += 8, addr1 += 8, addr2 += 8)
+        if (!cmpeq<512>(addr1, addr2)) return false;
+    if (size_i64 >= i + 4) {
+        if (!cmpeq<256>(addr1, addr2)) return false;
+        i += 4, addr1 += 4, addr2 += 4;
+    }
+    if (size_i64 >= i + 2) {
+        if (!cmpeq<128>(addr1, addr2)) return false;
+        i += 2, addr1 += 2, addr2 += 2;
+    }
+    if (size_i64 >= i + 1) {
+        if (*addr1 != *addr2) return false;
+        // no need to increment now
+    }
+    return true;
 }
 
 /// Bitwise OR operation on two memory regions,
