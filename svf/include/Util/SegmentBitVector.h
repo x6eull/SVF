@@ -133,11 +133,10 @@ protected:
         size_t i, const index_t& ind, Args&&... seg) noexcept {
         values.emplace(values.begin() + i, ind, std::forward<Args>(seg)...);
     }
-    inline __attribute__((always_inline)) void insert_till_end(
-        size_t this_offset, const SegmentBitVector rhs,
-        size_t other_offset) noexcept {
-        values.insert(values.begin() + this_offset,
-                      rhs.values.begin() + other_offset, rhs.values.end());
+    inline __attribute__((always_inline)) void push_back_till_end(
+        const SegmentBitVector rhs, size_t other_offset) noexcept {
+        values.insert(values.end(), rhs.values.begin() + other_offset,
+                      rhs.values.end());
     }
 
 public:
@@ -180,6 +179,7 @@ public:
             while (!end) {
                 auto mask = ~((static_cast<UnitType>(1) << bit_index) - 1);
                 auto masked_unit = valueIt->data.data[unit_index] & mask;
+                static_assert(sizeof(UnitType) == 8, "UnitType must be 64 bits, or __tzcnt_u64 can't be used");
                 auto tz_count = __tzcnt_u64(masked_unit);
                 if (tz_count < UnitBits) {
                     // found a set bit
@@ -284,7 +284,8 @@ public:
         auto it = values.begin();
         const auto v0 = avx_vec<SegmentBits>::load(&(it->data));
         auto c = avx_vec<SegmentBits>::popcnt(v0);
-        for (size_t i = 1; i < size(); i++, it++) {
+        ++it;
+        for (; it != values.end(); ++it) {
             const auto curv = avx_vec<SegmentBits>::load(&(it->data));
             const auto curc = avx_vec<SegmentBits>::popcnt(curv);
             c = avx_vec<SegmentBits>::add_op(c, curc);
@@ -350,6 +351,7 @@ public:
 
     /// Returns true if this set contains all bits of rhs.
     bool contains(const SegmentBitVector& rhs) const noexcept {
+        if (this->size() < rhs.size()) return false;
         size_t this_i = 0, rhs_i = 0;
         while (this_i < size() && rhs_i < rhs.size()) {
             const auto this_ind = index_at(this_i);
@@ -383,6 +385,8 @@ public:
 
     bool operator==(const SegmentBitVector& rhs) const noexcept {
         if (size() != rhs.size()) return false;
+        return std::memcmp(this->values.data(), rhs.values.data(),
+                           sizeof(IndexedSegment) / 8 * size()) == 0;
         return cmpeq(reinterpret_cast<const uint64_t*>(this->values.data()),
                      reinterpret_cast<const uint64_t*>(rhs.values.data()),
                      sizeof(IndexedSegment) / 8 * size());
@@ -415,7 +419,7 @@ public:
         }
         if (rhs_i < rhs_size) {
             // append remaining elements from rhs
-            insert_till_end(size(), rhs, rhs_i);
+            push_back_till_end(rhs, rhs_i);
             changed = true;
         }
         return changed;
