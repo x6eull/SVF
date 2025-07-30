@@ -215,8 +215,8 @@ public:
                 auto masked_unit = valueIt->data[unit_index] & mask;
                 static_assert(
                     sizeof(UnitType) == 8,
-                    "UnitType must be 64 bits, or __tzcnt_u64 can't be used");
-                auto tz_count = __tzcnt_u64(masked_unit);
+                    "UnitType must be 64 bits, or _tzcnt_u64 can't be used");
+                auto tz_count = _tzcnt_u64(masked_unit);
                 if (tz_count < UnitBits) {
                     // found a set bit
                     bit_index = tz_count;
@@ -668,8 +668,8 @@ public:
                 ++this_i, ++rhs_i;
             }
         }
-        changed |= (valid_count != this_size);
         truncate(valid_count);
+        changed |= (valid_count != this_size);
         return changed;
     }
     /// Inplace intersection with rhs.
@@ -705,24 +705,159 @@ public:
     }
     /// Inplace difference with rhs.
     /// Returns true if this set changed.
-    bool operator-=(const SegmentBitVector& rhs) {
+    bool quick_diff(const SegmentBitVector& rhs) {
+        const auto this_size = size(), rhs_size = rhs.size();
+        size_t valid_count = 0, this_i = 0, rhs_i = 0;
         bool changed = false;
-        size_t this_i = 0, rhs_i = 0;
-        while (this_i < size() && rhs_i < rhs.size()) {
+        while (this_i + 16 <= this_size && rhs_i + 16 <= rhs_size) {
+            /// indexes[this_i..this_i + 16]
+            const auto v_this_idx = _mm512_loadu_epi32(indexes.data() + this_i),
+                       v_rhs_idx =
+                           _mm512_loadu_epi32(rhs.indexes.data() + rhs_i);
+            /// whether each u32 matches (exist in both vectors)
+            uint16_t match_this, match_rhs;
+            ne_mm512_2intersect_epi32(v_this_idx, v_rhs_idx, match_this,
+                                      match_rhs);
+
+            /// the maximum index in current range [this_i..=this_i + 15],
+            /// spread to vector register
+            const auto rangemax_this = _mm512_set1_epi32(index_at(this_i + 15)),
+                       rangemax_rhs =
+                           _mm512_set1_epi32(rhs.index_at(rhs_i + 15));
+            /// whether each u32 index is less than or equal to
+            /// the maximum index in current range of the other vector
+            const uint16_t lemask_this = _mm512_cmple_epu32_mask(v_this_idx,
+                                                                 rangemax_rhs),
+                           lemask_rhs = _mm512_cmple_epu32_mask(v_rhs_idx,
+                                                                rangemax_this);
+            /// the number to increase for this_i / rhs_i
+            const auto advance_this = 32 - _lzcnt_u32(lemask_this),
+                       advance_rhs = 32 - _lzcnt_u32(lemask_rhs);
+
+            // align matched data of rhs to the shape of this.
+            // we don't care unmatched position
+            auto matched_this_temp = match_this, matched_rhs_temp = match_rhs;
+            Segment rhs_data_temp[512 / (sizeof(index_t) * 8)];
+            auto rhs_data_temp_addr = rhs_data_temp,
+                 rhs_data_addr = &rhs.data_at(rhs_i);
+            while (matched_this_temp) {
+                const auto this_pad = _tzcnt_u32(matched_this_temp),
+                           rhs_pad = _tzcnt_u32(matched_rhs_temp);
+                rhs_data_temp_addr += this_pad, rhs_data_addr += rhs_pad;
+                *rhs_data_temp_addr = *rhs_data_addr;
+                matched_this_temp >>= this_pad + 1,
+                    matched_rhs_temp >>= rhs_pad + 1;
+                ++rhs_data_temp_addr, ++rhs_data_addr;
+            }
+
+            /// each u32 index match => 2*u64 (data) to store & compute
+            auto dup_this = duplicate_bits(match_this);
+            const uint16_t advance_this_to_bits =
+                ((uint32_t)1 << advance_this) - 1;
+            const auto dup_advance_this = duplicate_bits(advance_this_to_bits);
+
+            // compute AND result of matched segments
+            LOOP_i_4({
+                /// matched & ordered 4 segments (8 u64) from memory. zero in
+                /// case of out of bounds
+                const auto v_this = _mm512_maskz_loadu_epi64(
+                    dup_advance_this >> (i * 8), &data_at(this_i) + i * 4);
+                const auto v_rhs = _mm512_maskz_loadu_epi64(
+                    dup_this >> (i * 8), &rhs_data_temp[i * 4]);
+                // _mm512_andnot_epi64 intrinsic: NOT of 512 bits (composed of
+                // packed 64-bit integers) in a and then AND with b
+                const auto andnot_result = _mm512_andnot_epi64(v_rhs, v_this);
+
+                if (!changed) // compute `changed` if not already set
+                    changed = !avx_vec<512>::eq_cmp(v_this, andnot_result);
+
+                /// zero-test for each u64, 1 means nonzero
+                const auto nzero_mask =
+                    _mm512_test_epi64_mask(andnot_result, andnot_result);
+                // _bit[2k] := bit[2k] | bit[2k+1]
+                uint8_t nzero_mask_by_segment =
+                    nzero_mask | ((nzero_mask & 0b10101010) >> 1);
+                // _bit[k] := bit[2k] | bit[2k+1]
+                const auto nzero_compressed =
+                    _pext_u32(nzero_mask_by_segment, 0b01010101);
+                // _bit[2k+1] := bit[2k] | bit[2k+1],
+                // compute here to improve pipeline perf
+                nzero_mask_by_segment |= ((nzero_mask & 0b01010101) << 1);
+                // store new index & data for 4 segments (remove empty segments)
+                _mm512_mask_compressstoreu_epi32(indexes.data() + valid_count,
+                                                 nzero_compressed << (i * 4),
+                                                 v_this_idx);
+                _mm512_mask_compressstoreu_epi64(data.data() + valid_count,
+                                                 nzero_mask_by_segment,
+                                                 andnot_result);
+
+                const auto nzero_count = _mm_popcnt_u32(nzero_compressed);
+                valid_count += nzero_count;
+            });
+            this_i += advance_this, rhs_i += advance_rhs;
+        }
+        while (this_i < this_size && rhs_i < rhs_size) {
             const auto this_ind = index_at(this_i);
             const auto rhs_ind = rhs.index_at(rhs_i);
-            if (this_ind < rhs_ind) ++this_i;
-            else if (this_ind > rhs_ind) ++rhs_i;
-            else {
-                const auto [cur_changed, zeroed] =
-                    (data_at(this_i) -= rhs.data_at(rhs_i));
-                changed |= cur_changed;
-                if (zeroed) erase_at(this_i); // remove empty segment
-                else ++this_i;
-                ++rhs_i;
+            if (this_ind < rhs_ind) { // keep this segment
+                indexes[valid_count] = this_ind;
+                data_at(valid_count) = data_at(this_i);
+                ++this_i;
+                ++valid_count;
+            } else if (this_ind > rhs_ind) ++rhs_i;
+            else { // compute ANDNOT
+                const auto v_this =
+                    avx_vec<SegmentBits>::load(&data_at(this_i));
+                const auto v_rhs =
+                    avx_vec<SegmentBits>::load(&rhs.data_at(rhs_i));
+                const auto andnot_result =
+                    avx_vec<SegmentBits>::andnot_op(v_this, v_rhs);
+                if (avx_vec<SegmentBits>::is_zero(
+                        andnot_result)) // changed to zero
+                    changed = true;
+                else {
+                    if (!changed)
+                        changed = !avx_vec<SegmentBits>::eq_cmp(v_this,
+                                                                andnot_result);
+                    indexes[valid_count] = this_ind;
+                    avx_vec<SegmentBits>::store(&data_at(valid_count),
+                                                andnot_result);
+                    valid_count++;
+                }
+                ++this_i, ++rhs_i;
             }
         }
+        // the rest element is kept
+        const auto rest_count = this_size - this_i;
+        std::memmove(&indexes[valid_count], &indexes[this_i],
+                     sizeof(index_t) * rest_count);
+        std::memmove(&data_at(valid_count), &data_at(this_i),
+                     sizeof(Segment) * rest_count);
+        valid_count += rest_count;
+        truncate(valid_count);
+        changed |= (valid_count != this_size);
         return changed;
+    }
+    bool operator-=(const SegmentBitVector& rhs) {
+        return quick_diff(rhs);
+        
+        // bool changed = false;
+        // size_t this_i = 0, rhs_i = 0;
+        // while (this_i < size() && rhs_i < rhs.size()) {
+        //     const auto this_ind = index_at(this_i);
+        //     const auto rhs_ind = rhs.index_at(rhs_i);
+        //     if (this_ind < rhs_ind) ++this_i;
+        //     else if (this_ind > rhs_ind) ++rhs_i;
+        //     else {
+        //         const auto [cur_changed, zeroed] =
+        //             (data_at(this_i) -= rhs.data_at(rhs_i));
+        //         changed |= cur_changed;
+        //         if (zeroed) erase_at(this_i); // remove empty segment
+        //         else ++this_i;
+        //         ++rhs_i;
+        //     }
+        // }
+        // return changed;
     }
     bool intersectWithComplement(const SegmentBitVector& rhs) {
         return *this -= rhs;
