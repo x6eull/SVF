@@ -365,8 +365,94 @@ public:
 
     /// Returns true if this set contains all bits of rhs.
     bool contains(const SegmentBitVector& rhs) const noexcept {
-        if (this->size() < rhs.size()) return false;
+        const auto this_size = size(), rhs_size = rhs.size();
+        if (this_size < rhs_size) return false;
+
         size_t this_i = 0, rhs_i = 0;
+        // num of segments := # of indexes intersected once
+        Segment this_data_temp[512 / (sizeof(index_t) * 8)],
+            rhs_data_temp[512 / (sizeof(index_t) * 8)];
+        while (this_i + 16 <= this_size && rhs_i + 16 <= rhs_size) {
+            /// indexes[this_i..this_i + 16]
+            const auto v_this_idx = _mm512_loadu_epi32(indexes.data() + this_i),
+                       v_rhs_idx =
+                           _mm512_loadu_epi32(rhs.indexes.data() + rhs_i);
+            /// whether each u32 matches (exist in both vectors)
+            uint16_t match_this, match_rhs;
+            ne_mm512_2intersect_epi32(v_this_idx, v_rhs_idx, match_this,
+                                      match_rhs);
+
+            /// the maximum index in current range [this_i..=this_i + 15],
+            /// spread to vector register
+            const auto rangemax_this = _mm512_set1_epi32(index_at(this_i + 15)),
+                       rangemax_rhs =
+                           _mm512_set1_epi32(rhs.index_at(rhs_i + 15));
+            /// whether each u32 index is less than or equal to
+            /// the maximum index in current range of the other vector
+            const uint16_t lemask_this = _mm512_cmple_epu32_mask(v_this_idx,
+                                                                 rangemax_rhs),
+                           lemask_rhs = _mm512_cmple_epu32_mask(v_rhs_idx,
+                                                                rangemax_this);
+
+            /// count of matched indexes
+            const auto match_count = (unsigned int)(_mm_popcnt_u32(match_this));
+
+            /// the number to increase for this_i / rhs_i
+            const auto advance_this = 32 - _lzcnt_u32(lemask_this),
+                       advance_rhs = 32 - _lzcnt_u32(lemask_rhs);
+
+            if (advance_this > match_count) return false;
+
+            /// each u32 index match => 2*u64 (data) to store & compute
+            auto dup_this = duplicate_bits(match_this),
+                 dup_rhs = duplicate_bits(match_rhs);
+            /// the start address of matched segments
+            uint64_t *const store_this_addr_start =
+                                reinterpret_cast<uint64_t*>(this_data_temp),
+                            *const store_rhs_addr_start =
+                                reinterpret_cast<uint64_t*>(rhs_data_temp);
+            /// current store position for matched segments
+            auto store_this_addr = store_this_addr_start,
+                 store_rhs_addr = store_rhs_addr_start;
+
+            // store matched segments contiguously
+            for (auto i = 0; i < 4; ++i) {
+                /// data[this_i + i * 4..=this_i + i * 4 + 3]
+                const auto v_this_data =
+                               _mm512_loadu_epi64(data_at(this_i + i * 4).data),
+                           v_rhs_data = _mm512_loadu_epi64(
+                               rhs.data_at(rhs_i + i * 4).data);
+                /// mask for storing current 4 segments (8 u64)
+                const uint8_t store_mask_this = dup_this & 0xff,
+                              store_mask_rhs = dup_rhs & 0xff;
+                _mm512_mask_compressstoreu_epi64(store_this_addr,
+                                                 store_mask_this, v_this_data);
+                store_this_addr += _mm_popcnt_u32(store_mask_this);
+                _mm512_mask_compressstoreu_epi64(store_rhs_addr, store_mask_rhs,
+                                                 v_rhs_data);
+                store_rhs_addr += _mm_popcnt_u32(store_mask_rhs);
+                dup_this >>= 8, dup_rhs >>= 8;
+            }
+            /// mask to load ordered segments from mem, each match
+            /// corresponds to 2 u64 in memory
+            uint32_t load_mask = ((uint64_t)1 << 2 * match_count) - 1;
+            // compute AND result of matched segments
+            for (auto i = 0; i < 4; ++i) {
+                /// matched & ordered 4 segments (8 u64) from memory. zero in
+                /// case of out of bounds
+                const auto intersect_this = _mm512_maskz_loadu_epi64(
+                    load_mask & 0xff, store_this_addr_start + i * 8);
+                const auto intersect_rhs = _mm512_maskz_loadu_epi64(
+                    load_mask & 0xff, store_rhs_addr_start + i * 8);
+                const auto and_result =
+                    _mm512_and_epi64(intersect_this, intersect_rhs);
+
+                if (!avx_vec<512>::eq_cmp(and_result, intersect_rhs))
+                    return false;
+                load_mask >>= 8;
+            }
+            this_i += advance_this, rhs_i += advance_rhs;
+        }
         while (this_i < size() && rhs_i < rhs.size()) {
             const auto this_ind = index_at(this_i);
             const auto rhs_ind = rhs.index_at(rhs_i);
