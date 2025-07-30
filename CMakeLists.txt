@@ -237,9 +237,6 @@ target_compile_options(
   INTERFACE $<$<CONFIG:Release>:-O2>
   INTERFACE $<$<CONFIG:Debug>:-O0>
 )
-# keep assertations in Release mode
-string(REPLACE "/DNDEBUG" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
-string(REPLACE "-DNDEBUG" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
 
 # Set the C++ standard as a public required feature
 target_compile_features(SvfFlags INTERFACE c_std_11 cxx_std_17)
@@ -306,7 +303,7 @@ target_link_options(SvfFlags INTERFACE $<$<NOT:$<BOOL:${SVF_ENABLE_RTTI}>>:-fno-
 # Expose build/link flags not required for users of SVF only in the build tree
 target_compile_options(
   SvfFlags
-  INTERFACE $<BUILD_INTERFACE:$<$<BOOL:${SVF_DEBUG_INFO}>:-g3>>
+  INTERFACE $<BUILD_INTERFACE:$<$<BOOL:${SVF_DEBUG_INFO}>:-g3 -gdwarf>>
   INTERFACE $<BUILD_INTERFACE:$<$<BOOL:${SVF_WARN_AS_ERROR}>:-Wall>>
   INTERFACE $<BUILD_INTERFACE:$<$<BOOL:${SVF_WARN_AS_ERROR}>:-Werror>>
   INTERFACE $<BUILD_INTERFACE:$<$<BOOL:${SVF_WARN_AS_ERROR}>:-Wno-deprecated-declarations>>
@@ -320,7 +317,7 @@ target_compile_options(
 )
 target_link_options(
   SvfFlags
-  INTERFACE $<BUILD_INTERFACE:$<$<BOOL:${SVF_DEBUG_INFO}>:-g3>>
+  INTERFACE $<BUILD_INTERFACE:$<$<BOOL:${SVF_DEBUG_INFO}>:-g3 -gdwarf>>
   INTERFACE $<BUILD_INTERFACE:$<$<BOOL:${SVF_WARN_AS_ERROR}>:-Wall>>
   INTERFACE $<BUILD_INTERFACE:$<$<BOOL:${SVF_WARN_AS_ERROR}>:-Werror>>
   INTERFACE $<BUILD_INTERFACE:$<$<BOOL:${SVF_WARN_AS_ERROR}>:-Wno-deprecated-declarations>>

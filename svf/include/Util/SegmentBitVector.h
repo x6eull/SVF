@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
@@ -8,6 +9,33 @@
 
 #include "SIMDHelper.h"
 #include "Util/GeneralType.h"
+
+/// Macro to loop 4 times, useful for unrolling loops.
+#define LOOP_i_4(block)                                                        \
+    {                                                                          \
+        constexpr int i = 0;                                                   \
+        block                                                                  \
+    }                                                                          \
+    {                                                                          \
+        constexpr int i = 1;                                                   \
+        block                                                                  \
+    }                                                                          \
+    {                                                                          \
+        constexpr int i = 2;                                                   \
+        block                                                                  \
+    }                                                                          \
+    {                                                                          \
+        constexpr int i = 3;                                                   \
+        block                                                                  \
+    }
+
+/// Returns a __m512i that contains 32*16-bit integers in ascending order,
+/// that is, {0, 1, 2, ..., 31} (from e0 to e31).
+static inline auto get_asc_indexes() {
+    return _mm512_set_epi16(31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19,
+                            18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5,
+                            4, 3, 2, 1, 0);
+}
 
 namespace SVF {
 template <uint16_t SegmentBits = 128> class SegmentBitVector {
@@ -369,9 +397,7 @@ public:
         if (this_size < rhs_size) return false;
 
         size_t this_i = 0, rhs_i = 0;
-        // num of segments := # of indexes intersected once
-        Segment this_data_temp[512 / (sizeof(index_t) * 8)],
-            rhs_data_temp[512 / (sizeof(index_t) * 8)];
+        const auto asc_indexes = get_asc_indexes();
         while (this_i + 16 <= this_size && rhs_i + 16 <= rhs_size) {
             /// indexes[this_i..this_i + 16]
             const auto v_this_idx = _mm512_loadu_epi32(indexes.data() + this_i),
@@ -406,51 +432,37 @@ public:
             /// each u32 index match => 2*u64 (data) to store & compute
             auto dup_this = duplicate_bits(match_this),
                  dup_rhs = duplicate_bits(match_rhs);
-            /// the start address of matched segments
-            uint64_t *const store_this_addr_start =
-                                reinterpret_cast<uint64_t*>(this_data_temp),
-                            *const store_rhs_addr_start =
-                                reinterpret_cast<uint64_t*>(rhs_data_temp);
-            /// current store position for matched segments
-            auto store_this_addr = store_this_addr_start,
-                 store_rhs_addr = store_rhs_addr_start;
 
-            // store matched segments contiguously
-            for (auto i = 0; i < 4; ++i) {
-                /// data[this_i + i * 4..=this_i + i * 4 + 3]
-                const auto v_this_data =
-                               _mm512_loadu_epi64(data_at(this_i + i * 4).data),
-                           v_rhs_data = _mm512_loadu_epi64(
-                               rhs.data_at(rhs_i + i * 4).data);
-                /// mask for storing current 4 segments (8 u64)
-                const uint8_t store_mask_this = dup_this & 0xff,
-                              store_mask_rhs = dup_rhs & 0xff;
-                _mm512_mask_compressstoreu_epi64(store_this_addr,
-                                                 store_mask_this, v_this_data);
-                store_this_addr += _mm_popcnt_u32(store_mask_this);
-                _mm512_mask_compressstoreu_epi64(store_rhs_addr, store_mask_rhs,
-                                                 v_rhs_data);
-                store_rhs_addr += _mm_popcnt_u32(store_mask_rhs);
-                dup_this >>= 8, dup_rhs >>= 8;
-            }
-            /// mask to load ordered segments from mem, each match
-            /// corresponds to 2 u64 in memory
-            uint32_t load_mask = ((uint64_t)1 << 2 * match_count) - 1;
-            // compute AND result of matched segments
-            for (auto i = 0; i < 4; ++i) {
-                /// matched & ordered 4 segments (8 u64) from memory. zero in
-                /// case of out of bounds
-                const auto intersect_this = _mm512_maskz_loadu_epi64(
-                    load_mask & 0xff, store_this_addr_start + i * 8);
-                const auto intersect_rhs = _mm512_maskz_loadu_epi64(
-                    load_mask & 0xff, store_rhs_addr_start + i * 8);
+            /// compress the intersected data's offset(/8bytes).
+            const auto gather_this_offset_u16x32 =
+                           ne_mm512_maskz_compress_epi16(dup_this, asc_indexes),
+                       gather_rhs_offset_u16x32 =
+                           ne_mm512_maskz_compress_epi16(dup_rhs, asc_indexes);
+            const auto gather_this_base_addr = data_at(this_i).data;
+            const auto gather_rhs_base_addr = rhs.data_at(rhs_i).data;
+
+            LOOP_i_4({ // required for `i` to be const
+                const auto cur_gather_this_offset_u16x8 =
+                    _mm512_extracti64x2_epi64(gather_this_offset_u16x32, i);
+                const auto cur_gather_rhs_offset_u16x8 =
+                    _mm512_extracti64x2_epi64(gather_rhs_offset_u16x32, i);
+
+                const auto cur_gather_this_offset_u64x8 =
+                    _mm512_cvtepu16_epi64(cur_gather_this_offset_u16x8);
+                const auto cur_gather_rhs_offset_u64x8 =
+                    _mm512_cvtepu16_epi64(cur_gather_rhs_offset_u16x8);
+
+                const auto intersect_this = _mm512_i64gather_epi64(
+                    cur_gather_this_offset_u64x8, gather_this_base_addr, 8);
+                const auto intersect_rhs = _mm512_i64gather_epi64(
+                    cur_gather_rhs_offset_u64x8, gather_rhs_base_addr, 8);
+
                 const auto and_result =
                     _mm512_and_epi64(intersect_this, intersect_rhs);
 
                 if (!avx_vec<512>::eq_cmp(and_result, intersect_rhs))
                     return false;
-                load_mask >>= 8;
-            }
+            });
             this_i += advance_this, rhs_i += advance_rhs;
         }
         while (this_i < size() && rhs_i < rhs.size()) {
@@ -531,10 +543,8 @@ public:
     bool intersect_fast(const SegmentBitVector& rhs) {
         const auto this_size = size(), rhs_size = rhs.size();
         size_t valid_count = 0, this_i = 0, rhs_i = 0;
-        // num of segments := # of indexes intersected once
-        Segment this_data_temp[512 / (sizeof(index_t) * 8)],
-            rhs_data_temp[512 / (sizeof(index_t) * 8)];
         bool changed = false;
+        const auto asc_indexes = get_asc_indexes();
         while (this_i + 16 <= this_size && rhs_i + 16 <= rhs_size) {
             /// indexes[this_i..this_i + 16]
             const auto v_this_idx = _mm512_loadu_epi32(indexes.data() + this_i),
@@ -563,49 +573,36 @@ public:
             /// each u32 index match => 2*u64 (data) to store & compute
             auto dup_this = duplicate_bits(match_this),
                  dup_rhs = duplicate_bits(match_rhs);
-            /// the start address of matched segments
-            uint64_t *const store_this_addr_start =
-                                reinterpret_cast<uint64_t*>(this_data_temp),
-                            *const store_rhs_addr_start =
-                                reinterpret_cast<uint64_t*>(rhs_data_temp);
-            /// current store position for matched segments
-            auto store_this_addr = store_this_addr_start,
-                 store_rhs_addr = store_rhs_addr_start;
 
-            // store matched segments contiguously
-            for (auto i = 0; i < 4; ++i) {
-                /// data[this_i + i * 4..=this_i + i * 4 + 3]
-                const auto v_this_data =
-                               _mm512_loadu_epi64(data_at(this_i + i * 4).data),
-                           v_rhs_data = _mm512_loadu_epi64(
-                               rhs.data_at(rhs_i + i * 4).data);
-                /// mask for storing current 4 segments (8 u64)
-                const uint8_t store_mask_this = dup_this & 0xff,
-                              store_mask_rhs = dup_rhs & 0xff;
-                _mm512_mask_compressstoreu_epi64(store_this_addr,
-                                                 store_mask_this, v_this_data);
-                store_this_addr += _mm_popcnt_u32(store_mask_this);
-                _mm512_mask_compressstoreu_epi64(store_rhs_addr, store_mask_rhs,
-                                                 v_rhs_data);
-                store_rhs_addr += _mm_popcnt_u32(store_mask_rhs);
-                dup_this >>= 8, dup_rhs >>= 8;
-            }
+            /// compress the intersected data's offset(/8bytes).
+            const auto gather_this_offset_u16x32 =
+                           ne_mm512_maskz_compress_epi16(dup_this, asc_indexes),
+                       gather_rhs_offset_u16x32 =
+                           ne_mm512_maskz_compress_epi16(dup_rhs, asc_indexes);
+            const auto gather_this_base_addr = data_at(this_i).data;
+            const auto gather_rhs_base_addr = rhs.data_at(rhs_i).data;
 
             const auto ordered_indexes =
                 _mm512_maskz_compress_epi32(match_this, v_this_idx);
-            /// count of matched indexes
-            const auto match_count = _mm_popcnt_u32(match_this);
-            /// mask to load ordered segments from mem, each match
-            /// corresponds to 2 u64 in memory
-            uint32_t load_mask = ((uint64_t)1 << 2 * match_count) - 1;
+
             // compute AND result of matched segments
-            for (auto i = 0; i < 4; ++i) {
+            LOOP_i_4({
+                const auto cur_gather_this_offset_u16x8 =
+                    _mm512_extracti64x2_epi64(gather_this_offset_u16x32, i);
+                const auto cur_gather_rhs_offset_u16x8 =
+                    _mm512_extracti64x2_epi64(gather_rhs_offset_u16x32, i);
+
+                const auto cur_gather_this_offset_u64x8 =
+                    _mm512_cvtepu16_epi64(cur_gather_this_offset_u16x8);
+                const auto cur_gather_rhs_offset_u64x8 =
+                    _mm512_cvtepu16_epi64(cur_gather_rhs_offset_u16x8);
+
                 /// matched & ordered 4 segments (8 u64) from memory. zero in
                 /// case of out of bounds
-                const auto intersect_this = _mm512_maskz_loadu_epi64(
-                    load_mask & 0xff, store_this_addr_start + i * 8);
-                const auto intersect_rhs = _mm512_maskz_loadu_epi64(
-                    load_mask & 0xff, store_rhs_addr_start + i * 8);
+                const auto intersect_this = _mm512_i64gather_epi64(
+                    cur_gather_this_offset_u64x8, gather_this_base_addr, 8);
+                const auto intersect_rhs = _mm512_i64gather_epi64(
+                    cur_gather_rhs_offset_u64x8, gather_rhs_base_addr, 8);
                 const auto and_result =
                     _mm512_and_epi64(intersect_this, intersect_rhs);
 
@@ -634,8 +631,7 @@ public:
 
                 const auto nzero_count = _mm_popcnt_u32(nzero_compressed);
                 valid_count += nzero_count;
-                load_mask >>= 8;
-            }
+            });
             this_i += advance_this, rhs_i += advance_rhs;
         }
         // use trival loop for the rest
@@ -682,7 +678,6 @@ public:
         return intersect_fast(rhs);
 
         // old implementation without SIMD
-        /*
         bool changed = false;
         size_t this_i = 0, rhs_i = 0;
         while (this_i < size() && rhs_i < rhs.size()) {
@@ -707,7 +702,6 @@ public:
             changed = true;
         }
         return changed;
-        */
     }
     /// Inplace difference with rhs.
     /// Returns true if this set changed.

@@ -20,8 +20,7 @@ _inline static uint16_t ror16(const uint16_t x, const int n) {
 /// Duplicate bits in 16-bit integer to 32-bit integer.
 /// 0bxyz -> 0bxxyyzz
 _inline uint32_t duplicate_bits(uint16_t from) {
-    static_assert(__BMI2__,
-                  "BMI2 is required for this operation");
+    static_assert(__BMI2__, "BMI2 is required for this operation");
     const auto even_dep = _pdep_u32(from, 0xAAAAAAAA);
     const auto odd_dep = _pdep_u32(from, 0x55555555);
     return odd_dep | even_dep;
@@ -31,7 +30,6 @@ _inline uint32_t duplicate_bits(uint16_t from) {
 /// Elements out of bounds are treated as maximum 64-bit integers.
 /// "ne" means native or emulated. Requires AVX512F.
 _inline void ne_mm512_2intersect_epi32(const __m512i& a, const __m512i& b,
-                                       // result masks
                                        __mmask16& k1, __mmask16& k2) {
 #if __AVX512_VP2INTERSECT__ && __AVX512VL__
     _mm512_2intersect_epi32(a, b, &k1, &k2);
@@ -73,6 +71,32 @@ _inline void ne_mm512_2intersect_epi32(const __m512i& a, const __m512i& b,
     k2 = m_0 | ((0x7777 & m_1) << 1) | ((m_1 >> 3) & 0x1111) |
          ((0x3333 & m_2) << 2) | ((m_2 >> 2) & 0x3333) | ((m_3 >> 1) & 0x7777) |
          ((m_3 & 0x1111) << 3);
+#endif
+}
+
+/// _mm512_maskz_compress_epi16 with emulated support.
+/// Requires AVX512F + AVX512DQ.
+_inline __m512i ne_mm512_maskz_compress_epi16(const __mmask32& k,
+                                              const __m512i& a) {
+#if __AVX512_VBMI2__
+    return _mm512_maskz_compress_epi16(k, a); // Latency:6 CPI:2
+#else
+    // TODO improve
+    const auto low_as_u32 = _mm512_cvtepu16_epi32(_mm512_castsi512_si256(a));
+    const auto low_compressed =
+        _mm512_maskz_compress_epi32(k & 0xffff, low_as_u32);
+    const auto high_as_u32 =
+        _mm512_cvtepu16_epi32(_mm512_extracti32x8_epi32(a, 1));
+    const auto high_compressed =
+        _mm512_maskz_compress_epi32((k >> 16) & 0xffff, high_as_u32);
+    const auto ztest_mask =
+        _mm512_test_epi32_mask(low_compressed, low_compressed);
+    const auto nzero_count = 32 - _lzcnt_u32((uint32_t)ztest_mask);
+    uint16_t temp[32]{};
+    _mm512_mask_cvtepi32_storeu_epi16(temp, 0xffff, low_compressed);
+    _mm512_mask_cvtepi32_storeu_epi16(temp + nzero_count, 0xffff,
+                                      high_compressed);
+    return _mm512_loadu_si512(temp);
 #endif
 }
 
