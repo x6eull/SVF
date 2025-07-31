@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <climits>
 #include <cstddef>
@@ -343,52 +344,47 @@ public:
     /// Returns true if n is in this set.
     bool test(uint32_t n) const noexcept {
         const auto target_ind = n - (n % SegmentBits);
-        for (size_t i = 0; i < size(); ++i) {
-            const auto ind = index_at(i);
-            if (ind > n) break; // early return
-            if (ind == target_ind) return data_at(i).test(n % SegmentBits);
-        }
-        return false;
+        const auto low_pos =
+            std::lower_bound(indexes.begin(), indexes.end(), target_ind);
+        const auto i = std::distance(indexes.begin(), low_pos);
+        if (low_pos == indexes.end() || *low_pos != target_ind) // not found
+            return false;
+        else return data_at(i).test(n % SegmentBits);
     }
 
     void set(uint32_t n) noexcept {
-        // TODO binary search?
-        size_t i = 0;
         const auto target_ind = n - (n % SegmentBits);
-        for (; i < size(); ++i) {
-            const auto ind = index_at(i);
-            if (ind > n) break; // need to insert before this index
-            if (ind == target_ind) return data_at(i).set(n % SegmentBits);
-        }
-        emplace_at(i, target_ind, n % SegmentBits);
+        const auto low_pos =
+            std::lower_bound(indexes.begin(), indexes.end(), target_ind);
+        const auto i = std::distance(indexes.begin(), low_pos);
+        if (low_pos == indexes.end() || *low_pos != target_ind) // not found
+            emplace_at(i, target_ind, Segment(n % SegmentBits));
+        else return data_at(i).set(n % SegmentBits);
     }
 
+    /// Check if bit is set. If it is, returns false.
+    /// Otherwise, sets bit and returns true.
     bool test_and_set(uint32_t n) noexcept {
-        size_t i = 0;
         const auto target_ind = n - (n % SegmentBits);
-        for (; i < size(); ++i) {
-            const auto ind = index_at(i);
-            if (ind > n) break; // need to insert before this index
-            if (ind == target_ind)
-                return data_at(i).test_and_set(n % SegmentBits);
-        }
-        emplace_at(i, target_ind, n % SegmentBits);
-        return true;
+        const auto low_pos =
+            std::lower_bound(indexes.begin(), indexes.end(), target_ind);
+        const auto i = std::distance(indexes.begin(), low_pos);
+        if (low_pos == indexes.end() || *low_pos != target_ind) { // not found
+            emplace_at(i, target_ind, Segment(n % SegmentBits));
+            return true;
+        } else return data_at(i).test_and_set(n % SegmentBits);
     }
 
     void reset(uint32_t n) noexcept {
-        // TODO binary search?
         const auto target_ind = n - (n % SegmentBits);
-        for (size_t i = 0; i < size(); ++i) {
-            const auto ind = index_at(i);
-            if (ind > n) break; // early return
-            if (ind == target_ind) {
-                auto& d = data_at(i);
-                d.reset(n % SegmentBits);
-                if (d.empty()) erase_at(i); // this segment is empty, remove it
-                break;
-            }
-        }
+        const auto low_pos =
+            std::lower_bound(indexes.begin(), indexes.end(), target_ind);
+        if (low_pos == indexes.end() || *low_pos != target_ind)
+            return; // not found
+        const auto i = std::distance(indexes.begin(), low_pos);
+        auto& d = data_at(i);
+        d.reset(n % SegmentBits);
+        if (d.empty()) erase_at(i); // this segment is empty, remove it
     }
 
     /// Returns true if this set contains all bits of rhs.
