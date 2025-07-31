@@ -74,32 +74,6 @@ _inline void ne_mm512_2intersect_epi32(const __m512i& a, const __m512i& b,
 #endif
 }
 
-/// _mm512_maskz_compress_epi16 with emulated support.
-/// Requires AVX512F + AVX512DQ.
-_inline __m512i ne_mm512_maskz_compress_epi16(const __mmask32& k,
-                                              const __m512i& a) {
-#if __AVX512_VBMI2__
-    return _mm512_maskz_compress_epi16(k, a); // Latency:6 CPI:2
-#else
-    // TODO improve
-    const auto low_as_u32 = _mm512_cvtepu16_epi32(_mm512_castsi512_si256(a));
-    const auto low_compressed =
-        _mm512_maskz_compress_epi32(k & 0xffff, low_as_u32);
-    const auto high_as_u32 =
-        _mm512_cvtepu16_epi32(_mm512_extracti32x8_epi32(a, 1));
-    const auto high_compressed =
-        _mm512_maskz_compress_epi32((k >> 16) & 0xffff, high_as_u32);
-    const auto ztest_mask =
-        _mm512_test_epi32_mask(low_compressed, low_compressed);
-    const auto nzero_count = 32 - _lzcnt_u32((uint32_t)ztest_mask);
-    uint16_t temp[32]{};
-    _mm512_mask_cvtepi32_storeu_epi16(temp, 0xffff, low_compressed);
-    _mm512_mask_cvtepi32_storeu_epi16(temp + nzero_count, 0xffff,
-                                      high_compressed);
-    return _mm512_loadu_si512(temp);
-#endif
-}
-
 template <unsigned short BitWidth> struct avx_vec {
     // static_assert(false, "Unsupported bit length");
 };

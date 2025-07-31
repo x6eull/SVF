@@ -429,15 +429,11 @@ public:
 
             if (advance_this > match_count) return false;
 
-            /// each u32 index match => 2*u64 (data) to store & compute
-            auto dup_this = duplicate_bits(match_this),
-                 dup_rhs = duplicate_bits(match_rhs);
-
             /// compress the intersected data's offset(/8bytes).
             const auto gather_this_offset_u16x32 =
-                           ne_mm512_maskz_compress_epi16(dup_this, asc_indexes),
+                           _mm512_maskz_compress_epi32(match_this, asc_indexes),
                        gather_rhs_offset_u16x32 =
-                           ne_mm512_maskz_compress_epi16(dup_rhs, asc_indexes);
+                           _mm512_maskz_compress_epi32(match_rhs, asc_indexes);
             const auto gather_this_base_addr = data_at(this_i).data;
             const auto gather_rhs_base_addr = rhs.data_at(rhs_i).data;
 
@@ -570,15 +566,11 @@ public:
             const auto advance_this = 32 - _lzcnt_u32(lemask_this),
                        advance_rhs = 32 - _lzcnt_u32(lemask_rhs);
 
-            /// each u32 index match => 2*u64 (data) to store & compute
-            auto dup_this = duplicate_bits(match_this),
-                 dup_rhs = duplicate_bits(match_rhs);
-
             /// compress the intersected data's offset(/8bytes).
             const auto gather_this_offset_u16x32 =
-                           ne_mm512_maskz_compress_epi16(dup_this, asc_indexes),
+                           _mm512_maskz_compress_epi32(match_this, asc_indexes),
                        gather_rhs_offset_u16x32 =
-                           ne_mm512_maskz_compress_epi16(dup_rhs, asc_indexes);
+                           _mm512_maskz_compress_epi32(match_rhs, asc_indexes);
             const auto gather_this_base_addr = data_at(this_i).data;
             const auto gather_rhs_base_addr = rhs.data_at(rhs_i).data;
 
@@ -840,7 +832,7 @@ public:
     }
     bool operator-=(const SegmentBitVector& rhs) {
         return quick_diff(rhs);
-        
+
         // bool changed = false;
         // size_t this_i = 0, rhs_i = 0;
         // while (this_i < size() && rhs_i < rhs.size()) {
