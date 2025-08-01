@@ -1,34 +1,34 @@
 #pragma once
 
 #include <algorithm>
-#include <cassert>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <iterator>
 #include <vector>
 
 #include "SIMDHelper.h"
 #include "Util/GeneralType.h"
 
-/// Macro to loop 4 times, useful for unrolling loops.
-#define LOOP_i_4(block)                                                        \
+#define DO_WHILE0(code)                                                        \
+    do {                                                                       \
+        code                                                                   \
+    } while (0);
+#define REPEAT_2(identifier, start_from, block)                                \
     {                                                                          \
-        constexpr int i = 0;                                                   \
-        block                                                                  \
+        constexpr int identifier = start_from;                                 \
+        DO_WHILE0(block)                                                       \
     }                                                                          \
     {                                                                          \
-        constexpr int i = 1;                                                   \
-        block                                                                  \
-    }                                                                          \
-    {                                                                          \
-        constexpr int i = 2;                                                   \
-        block                                                                  \
-    }                                                                          \
-    {                                                                          \
-        constexpr int i = 3;                                                   \
-        block                                                                  \
+        constexpr int identifier = start_from + 1;                             \
+        DO_WHILE0(block)                                                       \
     }
+#define REPEAT_i_2_from(start_from, block) REPEAT_2(i, start_from, block)
+#define REPEAT_i_2(block) REPEAT_i_2_from(0, block)
+/// Macro to loop 4 times, useful for unrolling loops.
+#define REPEAT_i_4(block) REPEAT_i_2_from(0, block) REPEAT_i_2_from(2, block)
 
 /// Returns a __m512i that contains 32*16-bit integers in ascending order,
 /// that is, {0, 1, 2, ..., 31} (from e0 to e31).
@@ -166,7 +166,7 @@ protected:
         data.emplace(data.begin() + i, std::forward<Args>(seg)...);
     }
     inline __attribute__((always_inline)) void push_back_till_end(
-        const SegmentBitVector rhs, size_t other_offset) noexcept {
+        const SegmentBitVector& rhs, size_t other_offset) noexcept {
         indexes.insert(indexes.end(), rhs.indexes.begin() + other_offset,
                        rhs.indexes.end());
         data.insert(data.end(), rhs.data.begin() + other_offset,
@@ -433,7 +433,7 @@ public:
             const auto gather_this_base_addr = data_at(this_i).data;
             const auto gather_rhs_base_addr = rhs.data_at(rhs_i).data;
 
-            LOOP_i_4({ // required for `i` to be const
+            REPEAT_i_4({ // required for `i` to be const
                 const auto cur_gather_this_offset_u16x8 =
                     _mm512_extracti64x2_epi64(gather_this_offset_u16x32, i);
                 const auto cur_gather_rhs_offset_u16x8 =
@@ -470,6 +470,7 @@ public:
         return rhs_i == rhs.size();
     }
 
+    // TODO: use SIMD to improve perf
     /// Returns true if this set and rhs share any bits.
     bool intersects(const SegmentBitVector& rhs) const noexcept {
         size_t this_i = 0, rhs_i = 0;
@@ -499,25 +500,241 @@ public:
         return !(*this == rhs);
     }
 
-    /// Inplace union with rhs.
-    /// Returns true if this set changed.
-    bool operator|=(const SegmentBitVector& rhs) {
-        const auto rhs_size = rhs.size();
-        indexes.reserve(rhs_size);
-        data.reserve(rhs_size);
-        size_t this_i = 0, rhs_i = 0;
+    // TODO: improve
+    bool union_simd(const SegmentBitVector& rhs) {
+        const auto this_size = size(), rhs_size = rhs.size();
+        size_t valid_count = 0, this_i = 0, rhs_i = 0;
         bool changed = false;
-        while (this_i < size() && rhs_i < rhs_size) {
-            const auto this_ind = index_at(this_i);
+        const auto source_rhs_mark512 = _mm512_set1_epi32(0b1'000);
+        const auto reserved_mask = _mm512_set1_epi32(0b1'111);
+        const auto offset_mask = _mm512_set1_epi32(0b0'111);
+        /// store into merged vector to mark position
+        const auto offset_info_this_u32x8 =
+            _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+        const auto offset_info_rhs_u32x8 =
+            _mm256_setr_epi32(8, 9, 10, 11, 12, 13, 14, 15);
+        const auto u64x8_dup_from_u64x4 =
+            _mm512_setr_epi64(0, 0, 1, 1, 2, 2, 3, 3);
+        const auto max = _mm256_set1_epi32(std::numeric_limits<int32_t>::max());
+        const auto offset_1_permutex = _mm512_setr_epi32(
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0);
+        /// the integers at 1, 3, 5, 7 are set to 8. 0 otherwise
+        const auto odd_8 = _mm512_maskz_set1_epi64(0b1010'1010, 8);
+
+        // std::vector<index_t> this_index_copy = indexes;
+        // std::vector<Segment> this_data_copy = data;
+        auto this_index_copy_raw =
+            (index_t*)std::malloc(this_size * sizeof(index_t));
+        std::memcpy(this_index_copy_raw, indexes.data(),
+                    this_size * sizeof(index_t));
+        auto this_data_copy_raw =
+            (Segment*)std::malloc(this_size * sizeof(Segment));
+        std::memcpy(this_data_copy_raw, data.data(),
+                    this_size * sizeof(Segment));
+        // Calling clear() does not affect the result of capacity().
+        indexes.clear(), data.clear();
+        alignas(64) Segment sorted_data[16];
+        while (this_i + 8 <= this_size && rhs_i + 8 <= rhs_size) {
+            // pack indexes[this_i..this_i + 8], rhs.indexes[rhs_i..rhs_i + 8]
+            // into a avx512 vector register (u32x16)
+            const auto v_this_idx =
+                           _mm256_loadu_epi32(&this_index_copy_raw[this_i]),
+                       v_rhs_idx =
+                           _mm256_loadu_epi32(rhs.indexes.data() + rhs_i);
+
+            const auto rangemax_this =
+                           _mm256_set1_epi32(this_index_copy_raw[this_i + 7]),
+                       rangemax_rhs = _mm256_set1_epi32(rhs.indexes[rhs_i + 7]);
+
+            const auto lemask_this =
+                           _mm256_cmple_epu32_mask(v_this_idx, rangemax_rhs),
+                       lemask_rhs =
+                           _mm256_cmple_epu32_mask(v_rhs_idx, rangemax_this);
+
+            // for those elements can't advance now, don't compare (skip
+            // processing in this iteration)
+            const auto v_this_masked = _mm256_mask_blend_epi32(lemask_this, max,
+                                                               v_this_idx),
+                       v_rhs_masked =
+                           _mm256_mask_blend_epi32(lemask_rhs, max, v_rhs_idx);
+
+            // number of indexes that can advance
+            const auto advance_this = 32 - _lzcnt_u32(lemask_this),
+                       advance_rhs = 32 - _lzcnt_u32(lemask_rhs);
+
+            // since `index` is multiple of SegmentBits, there are some bits
+            // left to store the origin position
+            // | 28 bits | 1 bit source | 3 bits offset |
+            static_assert(
+                SegmentBits >= 1 << 4,
+                "4 bits are required to sort the index along with value");
+
+            /// add source, offset info to the indexes
+            const auto v_this_marked =
+                _mm256_or_epi32(v_this_masked, offset_info_this_u32x8);
+            // bits[3] = 1 if the index is from rhs
+            const auto v_rhs_marked =
+                _mm256_or_epi32(v_rhs_masked, offset_info_rhs_u32x8);
+
+            // sort the register.
+            const auto combined_sort_result =
+                mergesort_epu32(v_this_marked, v_rhs_marked);
+            /// the count of valid indexes in sorted result
+            const auto n_processed = advance_this + advance_rhs;
+            /// the lowest n_valid bits set to 1
+            const uint16_t n_processed_bits = ((uint32_t)1 << n_processed) - 1;
+
+            /// set bits[0..=3] to 0
+            const auto sorted_real_index =
+                _mm512_andnot_epi32(reserved_mask, combined_sort_result);
+            /// shift left u32x1
+            const auto sorted_real_index_offset1 =
+                _mm512_permutexvar_epi32(offset_1_permutex, sorted_real_index);
+            /// whether each index is equal to the next
+            const uint16_t index_equal_mask = _mm512_mask_cmpeq_epi32_mask(
+                n_processed_bits, sorted_real_index_offset1, sorted_real_index);
+            /// whether each index is valid (0 if merge into prev)
+            const uint16_t index_valid_mask =
+                ~((uint32_t)index_equal_mask << 1) & n_processed_bits;
+
+            const auto rhs_base_addr_diff =
+                reinterpret_cast<const std::byte*>(&rhs.data_at(rhs_i)) -
+                reinterpret_cast<const std::byte*>(&this_data_copy_raw[this_i]);
+            const auto rhs_base_addr_diff_u64x8 =
+                _mm512_set1_epi64(rhs_base_addr_diff);
+            /// bits[i] = 1 iif combined_with_offset[i] come from rhs
+            const auto come_from_rhs = _mm512_mask_test_epi32_mask(
+                n_processed_bits, combined_sort_result, source_rhs_mark512);
+
+            /// extract offset (3 bits)
+            const auto offset_val = _mm512_maskz_and_epi32(
+                n_processed_bits, combined_sort_result, offset_mask);
+            /// offset in bytes
+            const auto offset_bytes = _mm512_mullo_epi32(
+                offset_val, _mm512_set1_epi32(sizeof(Segment)));
+
+            static_assert(sizeof(std::byte*) == sizeof(uint64_t),
+                          "64-bit address required");
+
+            //  sort the data
+            REPEAT_i_2({
+                if (i * 8 < n_processed) {
+                    const auto cur_offset_bytes_u32x8 =
+                        _mm512_extracti32x8_epi32(offset_bytes, i);
+                    /// we must use u64 for address
+                    const auto cur_offset_bytes_u64x8 =
+                        _mm512_cvtepu32_epi64(cur_offset_bytes_u32x8);
+                    const auto seg_addr_offset_u64x8 = _mm512_mask_add_epi64(
+                        cur_offset_bytes_u64x8, come_from_rhs >> (i * 8),
+                        cur_offset_bytes_u64x8, rhs_base_addr_diff_u64x8);
+                    REPEAT_2(j, 0, {
+                        if (i * 8 + j * 4 < n_processed) {
+                            const auto data_addr_offset_u64x4 =
+                                _mm512_extracti64x4_epi64(seg_addr_offset_u64x8,
+                                                          j);
+                            /// from a,b,c,d,e,f,g,h to a,a,b,b,...,h,h
+                            const auto data_addr_offset_dup_u64x8 =
+                                _mm512_permutexvar_epi64(
+                                    u64x8_dup_from_u64x4,
+                                    _mm512_castsi256_si512(
+                                        data_addr_offset_u64x4));
+                            /// add 8 (bytes) to odd elements
+                            const auto data_addr_offset_u64x8 =
+                                _mm512_add_epi64(data_addr_offset_dup_u64x8,
+                                                 odd_8);
+                            const auto data_gathered_u64x8_segx4 =
+                                _mm512_i64gather_epi64(
+                                    data_addr_offset_u64x8,
+                                    &this_data_copy_raw[this_i], 1);
+                            _mm512_store_epi64(&sorted_data[i * 8 + j * 4],
+                                               data_gathered_u64x8_segx4);
+                        }
+                    });
+                }
+            });
+
+            int valid_segs = 0;
+            // load sorted data, compute OR
+            REPEAT_i_4({
+                if (i * 4 < n_processed) {
+                    const auto cur_sorted_data_u64x8 =
+                        _mm512_loadu_epi64(&sorted_data[i * 4]);
+                    const auto sorted_data_offset_u64x8 =
+                        _mm512_loadu_epi64(&sorted_data[i * 4 + 1]);
+
+                    /// whether cur segment should use OR result (otherwise
+                    /// ignored or use as-is)
+                    const uint8_t use_merged_mask =
+                        (index_equal_mask >> (i * 4)) & 0xf;
+                    /// whether cur segment is valid (0 if merged into prev)
+                    const uint8_t valid_mask =
+                        (index_valid_mask >> (i * 4)) & 0xf;
+                    if (!changed) {
+                        /// whether cur segment comes from rhs
+                        const uint8_t rhs_mask =
+                            (come_from_rhs >> (i * 4)) & 0xf;
+                        // any rhs element is added (without OR)
+                        changed = rhs_mask & valid_mask & ~use_merged_mask;
+                    }
+
+                    /// OR result of current segment with next (sorted)
+                    const auto or_result = _mm512_or_epi64(
+                        cur_sorted_data_u64x8, sorted_data_offset_u64x8);
+                    if (!changed) {
+                        /// whether cur u64 is changed
+                        const uint8_t eq_mask = _mm512_cmpeq_epu64_mask(
+                            or_result, cur_sorted_data_u64x8);
+                        /// bits[2k] := bits[2k] & bits[2k + 1]
+                        const uint8_t seg_eq_mask =
+                            eq_mask & ((eq_mask & 0b1010'1010) >> 1);
+                        /// whether cur segment is unchanged (compress bits[2k]
+                        /// into bits[k])
+                        const auto seg_eq = _pext_u32(seg_eq_mask, 0b0101'0101);
+                        // cur seg is valid && changed && should use OR merged
+                        // one
+                        changed = valid_mask & use_merged_mask & ~seg_eq;
+                    }
+                    // NOTE: OR can't produce all-zero Segment
+                    const auto data_to_store = _mm512_mask_blend_epi64(
+                        duplicate_bits(use_merged_mask), cur_sorted_data_u64x8,
+                        or_result);
+                    _mm512_mask_compressstoreu_epi64(&sorted_data[valid_segs],
+                                                     duplicate_bits(valid_mask),
+                                                     data_to_store);
+                    valid_segs += _mm_popcnt_u32(valid_mask);
+                }
+            });
+            indexes.resize(indexes.size() + valid_segs);
+            _mm512_mask_compressstoreu_epi32(
+                &indexes[valid_count], index_valid_mask, sorted_real_index);
+            data.resize(data.size() + valid_segs);
+            std::memcpy(&data[valid_count], sorted_data,
+                        sizeof(Segment) * valid_segs);
+            this_i += advance_this, rhs_i += advance_rhs;
+            valid_count += valid_segs;
+        }
+        // deal with remaining elements
+        while (this_i < this_size && rhs_i < rhs_size) {
+            const auto this_ind = this_index_copy_raw[this_i];
             const auto rhs_ind = rhs.index_at(rhs_i);
-            if (this_ind < rhs_ind) ++this_i;
-            else if (this_ind > rhs_ind) {
+            if (this_ind < rhs_ind) {
+                indexes.emplace_back(this_ind);
+                data.emplace_back(this_data_copy_raw[this_i]);
+                ++valid_count;
+                ++this_i;
+            } else if (this_ind > rhs_ind) {
                 // copy current rhs segment to this
-                emplace_at(this_i, rhs_ind, rhs.data_at(rhs_i));
+                indexes.emplace_back(rhs_ind);
+                data.emplace_back(rhs.data_at(rhs_i));
+                ++valid_count;
                 changed = true;
-                ++this_i, ++rhs_i;
+                ++rhs_i;
             } else {
-                changed |= (data_at(this_i) |= rhs.data_at(rhs_i));
+                indexes.emplace_back(this_ind);
+                auto& inserted_data =
+                    data.emplace_back(this_data_copy_raw[this_i]);
+                changed |= (inserted_data |= rhs.data_at(rhs_i));
+                ++valid_count;
                 ++this_i, ++rhs_i;
             }
         }
@@ -525,8 +742,48 @@ public:
             // append remaining elements from rhs
             push_back_till_end(rhs, rhs_i);
             changed = true;
+        } else if (this_i < this_size) {
+            // append remaining elements from this
+            indexes.insert(indexes.end(), this_index_copy_raw + this_i,
+                           this_index_copy_raw + this_size);
+            data.insert(data.end(), this_data_copy_raw + this_i,
+                        this_data_copy_raw + this_size);
         }
+        std::free(this_index_copy_raw);
+        std::free(this_data_copy_raw);
         return changed;
+    }
+
+    /// Inplace union with rhs.
+    /// Returns true if this set changed.
+    bool operator|=(const SegmentBitVector& rhs) {
+        return union_simd(rhs);
+
+        // const auto rhs_size = rhs.size();
+        // indexes.reserve(rhs_size);
+        // data.reserve(rhs_size);
+        // size_t this_i = 0, rhs_i = 0;
+        // bool changed = false;
+        // while (this_i < size() && rhs_i < rhs_size) {
+        //     const auto this_ind = index_at(this_i);
+        //     const auto rhs_ind = rhs.index_at(rhs_i);
+        //     if (this_ind < rhs_ind) ++this_i;
+        //     else if (this_ind > rhs_ind) {
+        //         // copy current rhs segment to this
+        //         emplace_at(this_i, rhs_ind, rhs.data_at(rhs_i));
+        //         changed = true;
+        //         ++this_i, ++rhs_i;
+        //     } else {
+        //         changed |= (data_at(this_i) |= rhs.data_at(rhs_i));
+        //         ++this_i, ++rhs_i;
+        //     }
+        // }
+        // if (rhs_i < rhs_size) {
+        //     // append remaining elements from rhs
+        //     push_back_till_end(rhs, rhs_i);
+        //     changed = true;
+        // }
+        // return changed;
     }
 
     /// Inplace intersection with rhs.
@@ -574,7 +831,7 @@ public:
                 _mm512_maskz_compress_epi32(match_this, v_this_idx);
 
             // compute AND result of matched segments
-            LOOP_i_4({
+            REPEAT_i_4({
                 const auto cur_gather_this_offset_u16x8 =
                     _mm512_extracti64x2_epi64(gather_this_offset_u16x32, i);
                 const auto cur_gather_rhs_offset_u16x8 =
@@ -745,7 +1002,7 @@ public:
             const auto dup_advance_this = duplicate_bits(advance_this_to_bits);
 
             // compute AND result of matched segments
-            LOOP_i_4({
+            REPEAT_i_4({
                 /// matched & ordered 4 segments (8 u64) from memory. zero in
                 /// case of out of bounds
                 const auto v_this = _mm512_maskz_loadu_epi64(

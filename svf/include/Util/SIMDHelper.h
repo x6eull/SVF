@@ -74,8 +74,78 @@ _inline void ne_mm512_2intersect_epi32(const __m512i& a, const __m512i& b,
 #endif
 }
 
+using Item = uint32_t;
+using ui = uint32_t;
+
+template <ui bits> static inline void shuffle(__m256i& a) {
+    if constexpr (bits == 128)
+        a = _mm256_permutevar8x32_epi32(
+            a, _mm256_set_epi32(3, 2, 1, 0, 7, 6, 5, 4));
+    else if constexpr (bits == 64)
+        a = _mm256_shuffle_epi32(a, _MM_SHUFFLE(1, 0, 3, 2));
+    else if constexpr (bits == 32)
+        a = _mm256_shuffle_epi32(a, _MM_SHUFFLE(2, 3, 0, 1));
+}
+
+static inline void sort_reg_epi32(__m256i& a0) {
+    // *** NOTE: WORKS ONLY FOR SIGNED INTS!
+    __m256i aux = a0;
+    shuffle<128>(aux);
+
+    __m256i msk = _mm256_cmpgt_epi32(a0, aux);
+    __m256i msk1 = _mm256_set_epi32(0, 0, 0, 0, 0xFFFFFFFF, 0xFFFFFFFF,
+                                    0xFFFFFFFF, 0xFFFFFFFF);
+
+    __m256i msk2 = _mm256_or_si256(msk, msk1);
+    msk1 = _mm256_and_si256(msk, msk1);
+
+    a0 = _mm256_blendv_epi8(a0, aux, msk1);
+    a0 = _mm256_blendv_epi8(aux, a0, msk2);
+
+    aux = a0;
+    shuffle<64>(aux);
+    msk = _mm256_cmpgt_epi32(a0, aux);
+    msk1 = _mm256_set_epi32(0, 0, 0xFFFFFFFF, 0xFFFFFFFF, 0, 0, 0xFFFFFFFF,
+                            0xFFFFFFFF);
+
+    msk2 = _mm256_or_si256(msk, msk1);
+    msk1 = _mm256_and_si256(msk, msk1);
+
+    a0 = _mm256_blendv_epi8(a0, aux, msk1);
+    a0 = _mm256_blendv_epi8(aux, a0, msk2);
+
+    aux = a0;
+    shuffle<32>(aux);
+    msk = _mm256_cmpgt_epi32(a0, aux);
+    msk1 = _mm256_set_epi32(0, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0,
+                            0xFFFFFFFF);
+
+    msk2 = _mm256_or_si256(msk, msk1);
+    msk1 = _mm256_and_si256(msk, msk1);
+
+    a0 = _mm256_blendv_epi8(a0, aux, msk1);
+    a0 = _mm256_blendv_epi8(aux, a0, msk2);
+}
+
+// Modified from
+// https://github.com/arif-arman/origami-sort/blob/a1edd5dd6affd754b2ed99faa48d93966b9af34c/Origami/avx2_utils.h
+// https://dl.acm.org/doi/10.14778/3489496.3489507
+inline __m512i mergesort_epu32(const __m256i& a, const __m256i& b) {
+    // reverse
+    const auto b_rev = _mm256_permutevar8x32_epi32(
+        b, _mm256_set_epi32(0, 1, 2, 3, 4, 5, 6, 7));
+    // swap
+    auto vmin = _mm256_min_epu32(a, b_rev);
+    auto vmax = _mm256_max_epu32(a, b_rev);
+
+    sort_reg_epi32(vmin);
+    sort_reg_epi32(vmax);
+
+    return _mm512_inserti32x8(_mm512_castsi256_si512(vmin), vmax, 1);
+}
+
 template <unsigned short BitWidth> struct avx_vec {
-    // static_assert(false, "Unsupported bit length");
+    // static_assert(false, "Unsupported bit width");
 };
 template <> struct avx_vec<512> {
     using data_t = __m512i;
