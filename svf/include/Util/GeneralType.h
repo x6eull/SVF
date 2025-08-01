@@ -40,6 +40,7 @@
 #include <vector>
 #include <memory>
 #include "Util/SparseBitVector.h"
+#include "Util/SegmentBitVector.h"
 
 namespace SVF
 {
@@ -59,7 +60,12 @@ typedef unsigned CallSiteID;
 typedef unsigned ThreadID;
 typedef s64_t APOffset;
 
+#if SVF_REPLACE_DEFAULT_PT
+typedef SegmentBitVector<> NodeBS;
+#else
 typedef SparseBitVector<> NodeBS;
+#endif
+
 typedef unsigned PointsToID;
 
 /// provide extra hash function for std::pair handling

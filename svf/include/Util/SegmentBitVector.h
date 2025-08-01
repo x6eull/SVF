@@ -1,16 +1,17 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
+#include <limits>
 #include <vector>
 
 #include "SIMDHelper.h"
-#include "Util/GeneralType.h"
 
 #define DO_WHILE0(code)                                                        \
     do {                                                                       \
@@ -36,6 +37,10 @@ static inline auto get_asc_indexes() {
     return _mm512_set_epi16(31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19,
                             18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5,
                             4, 3, 2, 1, 0);
+}
+
+static inline size_t szudzik(size_t a, size_t b) {
+    return a > b ? b * b + a : a * a + a + b;
 }
 
 namespace SVF {
@@ -388,12 +393,13 @@ public:
     }
 
     /// Returns true if this set contains all bits of rhs.
-    bool contains(const SegmentBitVector& rhs) const noexcept {
+    bool contains_simd(const SegmentBitVector& rhs) const noexcept {
         const auto this_size = size(), rhs_size = rhs.size();
         if (this_size < rhs_size) return false;
 
         size_t this_i = 0, rhs_i = 0;
         const auto asc_indexes = get_asc_indexes();
+        const auto all_zero = _mm512_setzero_si512();
         while (this_i + 16 <= this_size && rhs_i + 16 <= rhs_size) {
             /// indexes[this_i..this_i + 16]
             const auto v_this_idx = _mm512_loadu_epi32(indexes.data() + this_i),
@@ -417,13 +423,13 @@ public:
                                                                 rangemax_this);
 
             /// count of matched indexes
-            const auto match_count = (unsigned int)(_mm_popcnt_u32(match_this));
+            const auto n_matched = (unsigned int)(_mm_popcnt_u32(match_this));
 
             /// the number to increase for this_i / rhs_i
             const auto advance_this = 32 - _lzcnt_u32(lemask_this),
                        advance_rhs = 32 - _lzcnt_u32(lemask_rhs);
 
-            if (advance_this > match_count) return false;
+            if (advance_rhs > n_matched) return false;
 
             /// compress the intersected data's offset(/8bytes).
             const auto gather_this_offset_u16x32 =
@@ -432,6 +438,9 @@ public:
                            _mm512_maskz_compress_epi32(match_rhs, asc_indexes);
             const auto gather_this_base_addr = data_at(this_i).data;
             const auto gather_rhs_base_addr = rhs.data_at(rhs_i).data;
+
+            const uint32_t n_matched_bits_dup =
+                ((uint64_t)1 << (n_matched * 2)) - 1;
 
             REPEAT_i_4({ // required for `i` to be const
                 const auto cur_gather_this_offset_u16x8 =
@@ -444,9 +453,11 @@ public:
                 const auto cur_gather_rhs_offset_u64x8 =
                     _mm512_cvtepu16_epi64(cur_gather_rhs_offset_u16x8);
 
-                const auto intersect_this = _mm512_i64gather_epi64(
+                const auto intersect_this = _mm512_mask_i64gather_epi64(
+                    all_zero, n_matched_bits_dup >> i * 8,
                     cur_gather_this_offset_u64x8, gather_this_base_addr, 8);
-                const auto intersect_rhs = _mm512_i64gather_epi64(
+                const auto intersect_rhs = _mm512_mask_i64gather_epi64(
+                    all_zero, n_matched_bits_dup >> i * 8,
                     cur_gather_rhs_offset_u64x8, gather_rhs_base_addr, 8);
 
                 const auto and_result =
@@ -468,6 +479,28 @@ public:
             }
         }
         return rhs_i == rhs.size();
+    }
+
+    bool contains_loop(const SegmentBitVector& rhs) const noexcept {
+        size_t this_i = 0, rhs_i = 0;
+        while (this_i < size() && rhs_i < rhs.size()) {
+            const auto this_ind = index_at(this_i);
+            const auto rhs_ind = rhs.index_at(rhs_i);
+            if (this_ind > rhs_ind) return false;
+            if (this_ind < rhs_ind) ++this_i;
+            else {
+                if (!data_at(this_i).contains(rhs.data_at(rhs_i))) return false;
+                ++this_i, ++rhs_i;
+            }
+        }
+        return rhs_i == rhs.size();
+    }
+
+    bool contains(const SegmentBitVector& rhs) const noexcept {
+        return contains_simd(rhs);
+        // auto simd_result = contains_simd(rhs), loop_result =
+        // contains_loop(rhs); assert(simd_result == loop_result); return
+        // simd_result;
     }
 
     // TODO: use SIMD to improve perf
@@ -786,14 +819,21 @@ public:
         // return changed;
     }
 
+    SegmentBitVector operator|(const SegmentBitVector& rhs) const {
+        SegmentBitVector copy(*this);
+        copy |= rhs;
+        return copy;
+    }
+
     /// Inplace intersection with rhs.
     /// Returns true if this set changed.
     /// Optimized using AVX512 intrinsics, requires AVX512F inst set.
-    bool intersect_fast(const SegmentBitVector& rhs) {
+    bool intersect_simd(const SegmentBitVector& rhs) {
         const auto this_size = size(), rhs_size = rhs.size();
         size_t valid_count = 0, this_i = 0, rhs_i = 0;
         bool changed = false;
         const auto asc_indexes = get_asc_indexes();
+        const auto all_zero = _mm512_setzero_si512();
         while (this_i + 16 <= this_size && rhs_i + 16 <= rhs_size) {
             /// indexes[this_i..this_i + 16]
             const auto v_this_idx = _mm512_loadu_epi32(indexes.data() + this_i),
@@ -830,6 +870,10 @@ public:
             const auto ordered_indexes =
                 _mm512_maskz_compress_epi32(match_this, v_this_idx);
 
+            const auto n_matched = _mm_popcnt_u32(match_this);
+            const uint32_t n_matched_bits_dup =
+                ((uint64_t)1 << (n_matched * 2)) - 1;
+
             // compute AND result of matched segments
             REPEAT_i_4({
                 const auto cur_gather_this_offset_u16x8 =
@@ -844,9 +888,11 @@ public:
 
                 /// matched & ordered 4 segments (8 u64) from memory. zero in
                 /// case of out of bounds
-                const auto intersect_this = _mm512_i64gather_epi64(
+                const auto intersect_this = _mm512_mask_i64gather_epi64(
+                    all_zero, n_matched_bits_dup >> i * 8,
                     cur_gather_this_offset_u64x8, gather_this_base_addr, 8);
-                const auto intersect_rhs = _mm512_i64gather_epi64(
+                const auto intersect_rhs = _mm512_mask_i64gather_epi64(
+                    all_zero, n_matched_bits_dup >> i * 8,
                     cur_gather_rhs_offset_u64x8, gather_rhs_base_addr, 8);
                 const auto and_result =
                     _mm512_and_epi64(intersect_this, intersect_rhs);
@@ -920,37 +966,37 @@ public:
     /// Inplace intersection with rhs.
     /// Returns true if this set changed.
     bool operator&=(const SegmentBitVector& rhs) {
-        return intersect_fast(rhs);
+        return intersect_simd(rhs);
 
-        // old implementation without SIMD
-        bool changed = false;
-        size_t this_i = 0, rhs_i = 0;
-        while (this_i < size() && rhs_i < rhs.size()) {
-            const auto this_ind = index_at(this_i);
-            const auto rhs_ind = rhs.index_at(rhs_i);
-            if (this_ind < rhs_ind) {
-                erase_at(this_i);
-                changed = true;
-            } else if (this_ind > rhs_ind) ++rhs_i;
-            else {
-                const auto [cur_changed, zeroed] =
-                    (data_at(this_i) &= rhs.data_at(rhs_i));
-                changed |= cur_changed;
-                if (zeroed) erase_at(this_i); // remove empty segment
-                else ++this_i;
-                ++rhs_i;
-            }
-        }
-        if (this_i < size()) {
-            // remove remaining elements from this
-            truncate(this_i);
-            changed = true;
-        }
-        return changed;
+        // // old implementation without SIMD
+        // bool changed = false;
+        // size_t this_i = 0, rhs_i = 0;
+        // while (this_i < size() && rhs_i < rhs.size()) {
+        //     const auto this_ind = index_at(this_i);
+        //     const auto rhs_ind = rhs.index_at(rhs_i);
+        //     if (this_ind < rhs_ind) {
+        //         erase_at(this_i);
+        //         changed = true;
+        //     } else if (this_ind > rhs_ind) ++rhs_i;
+        //     else {
+        //         const auto [cur_changed, zeroed] =
+        //             (data_at(this_i) &= rhs.data_at(rhs_i));
+        //         changed |= cur_changed;
+        //         if (zeroed) erase_at(this_i); // remove empty segment
+        //         else ++this_i;
+        //         ++rhs_i;
+        //     }
+        // }
+        // if (this_i < size()) {
+        //     // remove remaining elements from this
+        //     truncate(this_i);
+        //     changed = true;
+        // }
+        // return changed;
     }
     /// Inplace difference with rhs.
     /// Returns true if this set changed.
-    bool quick_diff(const SegmentBitVector& rhs) {
+    bool diff_simd(const SegmentBitVector& rhs) {
         const auto this_size = size(), rhs_size = rhs.size();
         size_t valid_count = 0, this_i = 0, rhs_i = 0;
         bool changed = false;
@@ -1084,7 +1130,7 @@ public:
         return changed;
     }
     bool operator-=(const SegmentBitVector& rhs) {
-        return quick_diff(rhs);
+        return diff_simd(rhs);
 
         // bool changed = false;
         // size_t this_i = 0, rhs_i = 0;
@@ -1116,9 +1162,7 @@ public:
     }
 
     size_t hash() const noexcept {
-        SVF::Hash<std::pair<std::pair<size_t, size_t>, size_t>> h;
-        return h(std::make_pair(std::make_pair(count(), size()),
-                                size() > 0 ? *begin() : -1));
+        return szudzik(count(), szudzik(size(), size() > 0 ? *begin() : -1));
     }
 };
 } // namespace SVF
