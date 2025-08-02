@@ -26,10 +26,14 @@
         constexpr int identifier = start_from + 1;                             \
         DO_WHILE0(block)                                                       \
     }
-#define REPEAT_i_2_from(start_from, block) REPEAT_2(i, start_from, block)
-#define REPEAT_i_2(block) REPEAT_i_2_from(0, block)
-/// Macro to loop 4 times, useful for unrolling loops.
-#define REPEAT_i_4(block) REPEAT_i_2_from(0, block) REPEAT_i_2_from(2, block)
+#define REPEAT_4(identifier, start_from, block)                                \
+    REPEAT_2(identifier, start_from, block)                                    \
+    REPEAT_2(identifier, (start_from) + 2, block)
+#define REPEAT_8(identifier, start_from, block)                                \
+    REPEAT_4(identifier, start_from, block)                                    \
+    REPEAT_4(identifier, (start_from) + 4, block)
+#define REPEAT_i_2(block) REPEAT_2(i, 0, block)
+#define REPEAT_i_4(block) REPEAT_4(i, 0, block)
 
 /// Returns a __m512i that contains 32*16-bit integers in ascending order,
 /// that is, {0, 1, 2, ..., 31} (from e0 to e31).
@@ -538,21 +542,23 @@ public:
         const auto this_size = size(), rhs_size = rhs.size();
         size_t valid_count = 0, this_i = 0, rhs_i = 0;
         bool changed = false;
-        const auto source_rhs_mark512 = _mm512_set1_epi32(0b1'000);
-        const auto reserved_mask = _mm512_set1_epi32(0b1'111);
-        const auto offset_mask = _mm512_set1_epi32(0b0'111);
+        const auto source_rhs_mark = _mm512_set1_epi32(0b1'0000);
+        const auto reserved_extract_mask = _mm512_set1_epi32(0b1'1111);
+        const auto offset_extract_mask = _mm512_set1_epi32(0b0'1111);
         /// store into merged vector to mark position
-        const auto offset_info_this_u32x8 =
-            _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
-        const auto offset_info_rhs_u32x8 =
-            _mm256_setr_epi32(8, 9, 10, 11, 12, 13, 14, 15);
+        const auto offset_info_this_u32x16 = _mm512_setr_epi32(
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+        const auto offset_info_rhs_u32x16 = _mm512_setr_epi32(
+            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
         const auto u64x8_dup_from_u64x4 =
             _mm512_setr_epi64(0, 0, 1, 1, 2, 2, 3, 3);
-        const auto max = _mm256_set1_epi32(std::numeric_limits<int32_t>::max());
-        const auto offset_1_permutex = _mm512_setr_epi32(
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0);
+        const auto max =
+            _mm512_set1_epi32(std::numeric_limits<uint32_t>::max());
+        const auto offset_1_permutex2 = _mm512_setr_epi32(
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
         /// the integers at 1, 3, 5, 7 are set to 8. 0 otherwise
         const auto odd_8 = _mm512_maskz_set1_epi64(0b1010'1010, 8);
+        const auto seg_size = _mm512_set1_epi32(sizeof(Segment));
 
         // std::vector<index_t> this_index_copy = indexes;
         // std::vector<Segment> this_data_copy = data;
@@ -566,94 +572,123 @@ public:
                     this_size * sizeof(Segment));
         // Calling clear() does not affect the result of capacity().
         indexes.clear(), data.clear();
-        alignas(64) Segment sorted_data[16];
-        while (this_i + 8 <= this_size && rhs_i + 8 <= rhs_size) {
-            // pack indexes[this_i..this_i + 8], rhs.indexes[rhs_i..rhs_i + 8]
+        alignas(64) Segment sorted_data[32];
+        while (this_i + 16 <= this_size && rhs_i + 16 <= rhs_size) {
+            // pack indexes[this_i..this_i + 16), rhs.indexes[rhs_i..rhs_i + 16)
             // into a avx512 vector register (u32x16)
             const auto v_this_idx =
-                           _mm256_loadu_epi32(&this_index_copy_raw[this_i]),
+                           _mm512_loadu_epi32(&this_index_copy_raw[this_i]),
                        v_rhs_idx =
-                           _mm256_loadu_epi32(rhs.indexes.data() + rhs_i);
+                           _mm512_loadu_epi32(rhs.indexes.data() + rhs_i);
 
             const auto rangemax_this =
-                           _mm256_set1_epi32(this_index_copy_raw[this_i + 7]),
-                       rangemax_rhs = _mm256_set1_epi32(rhs.indexes[rhs_i + 7]);
+                           _mm512_set1_epi32(this_index_copy_raw[this_i + 15]),
+                       rangemax_rhs =
+                           _mm512_set1_epi32(rhs.indexes[rhs_i + 15]);
 
             const auto lemask_this =
-                           _mm256_cmple_epu32_mask(v_this_idx, rangemax_rhs),
+                           _mm512_cmple_epu32_mask(v_this_idx, rangemax_rhs),
                        lemask_rhs =
-                           _mm256_cmple_epu32_mask(v_rhs_idx, rangemax_this);
+                           _mm512_cmple_epu32_mask(v_rhs_idx, rangemax_this);
 
             // for those elements can't advance now, don't compare (skip
             // processing in this iteration)
-            const auto v_this_masked = _mm256_mask_blend_epi32(lemask_this, max,
+            const auto v_this_masked = _mm512_mask_blend_epi32(lemask_this, max,
                                                                v_this_idx),
                        v_rhs_masked =
-                           _mm256_mask_blend_epi32(lemask_rhs, max, v_rhs_idx);
+                           _mm512_mask_blend_epi32(lemask_rhs, max, v_rhs_idx);
 
-            // number of indexes that can advance
+            // number of indexes that can advance, each <= 16
             const auto advance_this = 32 - _lzcnt_u32(lemask_this),
                        advance_rhs = 32 - _lzcnt_u32(lemask_rhs);
 
             // since `index` is multiple of SegmentBits, there are some bits
             // left to store the origin position
-            // | 28 bits | 1 bit source | 3 bits offset |
+            // | 27 bits | 1 bit source | 4 bits offset |
             static_assert(
-                SegmentBits >= 1 << 4,
-                "4 bits are required to sort the index along with value");
+                SegmentBits >= 1 << 5,
+                "5 bits are required to sort the index along with value");
 
             /// add source, offset info to the indexes
-            const auto v_this_marked =
-                _mm256_or_epi32(v_this_masked, offset_info_this_u32x8);
-            // bits[3] = 1 if the index is from rhs
-            const auto v_rhs_marked =
-                _mm256_or_epi32(v_rhs_masked, offset_info_rhs_u32x8);
+            const auto v_this_marked = _mm512_or_epi32(v_this_masked,
+                                                       offset_info_this_u32x16),
+                       v_rhs_marked = _mm512_or_epi32(v_rhs_masked,
+                                                      offset_info_rhs_u32x16);
 
-            // sort the register.
-            const auto combined_sort_result =
-                mergesort_epu32(v_this_marked, v_rhs_marked);
-            /// the count of valid indexes in sorted result
+            auto sorted_low = v_this_marked, sorted_high = v_rhs_marked;
+            rswap(sorted_low, sorted_high);
+
+            /// the count of valid indexes in sorted result, <=32
             const auto n_processed = advance_this + advance_rhs;
             /// the lowest n_valid bits set to 1
-            const uint16_t n_processed_bits = ((uint32_t)1 << n_processed) - 1;
+            const uint32_t n_processed_bits = ((uint64_t)1 << n_processed) - 1;
+            const uint16_t n_processed_bits_low = n_processed_bits,
+                           n_processed_bits_high = n_processed_bits >> 16;
 
-            /// set bits[0..=3] to 0
-            const auto sorted_real_index =
-                _mm512_andnot_epi32(reserved_mask, combined_sort_result);
+            /// set bits[0..=4] to 0
+            const auto sorted_real_index_low = _mm512_andnot_epi32(
+                           reserved_extract_mask, sorted_low),
+                       sorted_real_index_high = _mm512_andnot_epi32(
+                           reserved_extract_mask, sorted_high);
             /// shift left u32x1
-            const auto sorted_real_index_offset1 =
-                _mm512_permutexvar_epi32(offset_1_permutex, sorted_real_index);
-            /// whether each index is equal to the next
-            const uint16_t index_equal_mask = _mm512_mask_cmpeq_epi32_mask(
-                n_processed_bits, sorted_real_index_offset1, sorted_real_index);
-            /// whether each index is valid (0 if merge into prev)
-            const uint16_t index_valid_mask =
-                ~((uint32_t)index_equal_mask << 1) & n_processed_bits;
+            const auto sorted_real_index_low_offset1 =
+                           _mm512_permutex2var_epi32(sorted_real_index_low,
+                                                     offset_1_permutex2,
+                                                     sorted_real_index_high),
+                       sorted_real_index_high_offset1 =
+                           _mm512_permutex2var_epi32(sorted_real_index_high,
+                                                     offset_1_permutex2,
+                                                     sorted_real_index_high);
+            /// whether each index is equal to the next. 0 if invalid
+            const uint16_t index_equal_mask_low = _mm512_mask_cmpeq_epi32_mask(
+                               n_processed_bits_low, sorted_real_index_low,
+                               sorted_real_index_low_offset1),
+                           index_equal_mask_high = _mm512_mask_cmpeq_epi32_mask(
+                               n_processed_bits_high, sorted_real_index_high,
+                               sorted_real_index_high_offset1);
+            const uint32_t index_equal_mask =
+                index_equal_mask_low | (index_equal_mask_high << 16);
+            /// whether each index is valid (0 if merge into prev | skipped)
+            const uint32_t index_valid_mask =
+                ~((uint64_t)index_equal_mask << 1) & n_processed_bits;
+
+            /// extract offset (4 bits)
+            const auto offset_val_low = _mm512_maskz_and_epi32(
+                           n_processed_bits_low, sorted_low,
+                           offset_extract_mask),
+                       offset_val_high = _mm512_maskz_and_epi32(
+                           n_processed_bits_high, sorted_high,
+                           offset_extract_mask);
+            /// offset in bytes
+            const auto offset_bytes_low =
+                           _mm512_mullo_epi32(offset_val_low, seg_size),
+                       offset_bytes_high =
+                           _mm512_mullo_epi32(offset_val_high, seg_size);
+
+            static_assert(sizeof(std::byte*) == sizeof(uint64_t),
+                          "64-bit address required");
 
             const auto rhs_base_addr_diff =
                 reinterpret_cast<const std::byte*>(&rhs.data_at(rhs_i)) -
                 reinterpret_cast<const std::byte*>(&this_data_copy_raw[this_i]);
             const auto rhs_base_addr_diff_u64x8 =
                 _mm512_set1_epi64(rhs_base_addr_diff);
-            /// bits[i] = 1 iif combined_with_offset[i] come from rhs
-            const auto come_from_rhs = _mm512_mask_test_epi32_mask(
-                n_processed_bits, combined_sort_result, source_rhs_mark512);
+            /// bits[i] = 1 iif come from rhs && valid
+            const auto come_from_rhs_low = _mm512_mask_test_epi32_mask(
+                           n_processed_bits_low, sorted_low, source_rhs_mark),
+                       come_from_rhs_high = _mm512_mask_test_epi32_mask(
+                           n_processed_bits_high, sorted_high, source_rhs_mark);
+            const auto come_from_rhs =
+                come_from_rhs_low | (come_from_rhs_high << 16);
 
-            /// extract offset (3 bits)
-            const auto offset_val = _mm512_maskz_and_epi32(
-                n_processed_bits, combined_sort_result, offset_mask);
-            /// offset in bytes
-            const auto offset_bytes = _mm512_mullo_epi32(
-                offset_val, _mm512_set1_epi32(sizeof(Segment)));
-
-            static_assert(sizeof(std::byte*) == sizeof(uint64_t),
-                          "64-bit address required");
-
-            //  sort the data
-            REPEAT_i_2({
+            //  Sort the data: Gather from correct mem address, then store
+            //  contiguously
+            REPEAT_4(i, 0, {
                 if (i * 8 < n_processed) {
                     const auto cur_offset_bytes_u32x8 =
-                        _mm512_extracti32x8_epi32(offset_bytes, i);
+                        _mm512_extracti32x8_epi32(i < 2 ? offset_bytes_low
+                                                        : offset_bytes_high,
+                                                  i % 2);
                     /// we must use u64 for address
                     const auto cur_offset_bytes_u64x8 =
                         _mm512_cvtepu32_epi64(cur_offset_bytes_u32x8);
@@ -687,8 +722,8 @@ public:
             });
 
             int valid_segs = 0;
-            // load sorted data, compute OR
-            REPEAT_i_4({
+            // load sorted data, compute OR, store result
+            REPEAT_8(i, 0, {
                 if (i * 4 < n_processed) {
                     const auto cur_sorted_data_u64x8 =
                         _mm512_loadu_epi64(&sorted_data[i * 4]);
@@ -738,8 +773,13 @@ public:
                 }
             });
             indexes.resize(indexes.size() + valid_segs);
+            const auto n_valid_index_in_low =
+                _mm_popcnt_u32(index_valid_mask & 0xffff);
             _mm512_mask_compressstoreu_epi32(
-                &indexes[valid_count], index_valid_mask, sorted_real_index);
+                &indexes[valid_count], index_valid_mask, sorted_real_index_low);
+            _mm512_mask_compressstoreu_epi32(
+                &indexes[valid_count + n_valid_index_in_low],
+                index_valid_mask >> 16, sorted_real_index_high);
             data.resize(data.size() + valid_segs);
             std::memcpy(&data[valid_count], sorted_data,
                         sizeof(Segment) * valid_segs);
