@@ -232,12 +232,7 @@ message(
 # Define an interface library which contains publically exposed properties/flags/defs
 add_library(SvfFlags INTERFACE)
 
-target_compile_options(
-  SvfFlags
-  INTERFACE -march=native
-  INTERFACE $<$<CONFIG:Release>:-O2>
-  INTERFACE $<$<CONFIG:Debug>:-O0>
-)
+target_compile_options(SvfFlags INTERFACE -march=native)
 
 # Set the C++ standard as a public required feature
 target_compile_features(SvfFlags INTERFACE c_std_11 cxx_std_17)
