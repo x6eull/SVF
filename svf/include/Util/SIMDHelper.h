@@ -33,7 +33,7 @@ _inline uint32_t duplicate_bits(uint16_t from) {
 /// "ne" means native or emulated. Requires AVX512F.
 _inline void ne_mm512_2intersect_epi32(const __m512i& a, const __m512i& b,
                                        __mmask16& k1, __mmask16& k2) {
-#if __AVX512_VP2INTERSECT__ && __AVX512VL__
+#if __AVX512VP2INTERSECT__ 
     _mm512_2intersect_epi32(a, b, &k1, &k2);
 #else // From https://arxiv.org/abs/2112.06342
     static_assert(__AVX512F__, "AVX512F is required for this operation");

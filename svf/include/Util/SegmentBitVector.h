@@ -327,11 +327,11 @@ public:
         if (size() == 0) return 0;
 
 #if __AVX512VPOPCNTDQ__ && __AVX512VL__
-        auto it = values.begin();
+        auto it = data.begin();
         const auto v0 = avx_vec<SegmentBits>::load(&(it->data));
         auto c = avx_vec<SegmentBits>::popcnt(v0);
         ++it;
-        for (; it != values.end(); ++it) {
+        for (; it != data.end(); ++it) {
             const auto curv = avx_vec<SegmentBits>::load(&(it->data));
             const auto curc = avx_vec<SegmentBits>::popcnt(curv);
             c = avx_vec<SegmentBits>::add_op(c, curc);
@@ -1008,30 +1008,23 @@ public:
             }
 
             /// each u32 index match => 2*u64 (data) to store & compute
-            auto dup_this = duplicate_bits(match_this);
-            const uint16_t advance_this_to_bits =
-                ((uint32_t)1 << advance_this) - 1;
-            const auto dup_advance_this = duplicate_bits(advance_this_to_bits);
+            auto dup_match_this = duplicate_bits(match_this);
 
             // compute OR result of matched segments
             REPEAT_i_4({
                 /// matched & ordered 4 segments (8 u64) from memory. zero in
                 /// case of out of bounds
-                const auto v_this = _mm512_maskz_loadu_epi64(
-                    dup_advance_this >> (i * 8), &data_at(this_i) + i * 4);
+                const auto v_this =
+                    _mm512_loadu_epi64(&data_at(this_i + i * 4));
                 const auto v_rhs = _mm512_maskz_loadu_epi64(
-                    dup_this >> (i * 8), &rhs_data_temp[i * 4]);
+                    dup_match_this >> (i * 8), &rhs_data_temp[i * 4]);
                 const auto or_result = _mm512_or_epi64(v_this, v_rhs);
 
                 if (!changed) // compute `changed` if not already set
                     changed = !avx_vec<512>::eq_cmp(v_this, or_result);
 
-                _mm512_mask_storeu_epi64(data.data() + this_i + i * 4,
-                                         dup_advance_this >> (i * 8),
-                                         or_result);
+                _mm512_storeu_epi64(&data_at(this_i + i * 4), or_result);
             });
-            _mm512_mask_storeu_epi32(indexes.data() + this_i, dup_advance_this,
-                                     v_this_idx);
             this_i += advance_this, rhs_i += advance_rhs;
         }
 
