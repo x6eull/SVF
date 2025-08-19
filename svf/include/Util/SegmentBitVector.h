@@ -6,11 +6,18 @@
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
-#include <limits>
+#include <memory>
 #include <vector>
 
 #include "SIMDHelper.h"
 
+#define DEFAULT_COPY(T)                                                        \
+    T(const T&) = default;                                                     \
+    T& operator=(const T&) = default;
+#define DEFAULT_MOVE(T)                                                        \
+    T(T&&) = default;                                                          \
+    T& operator=(T&&) = default;
+#define DEFAULT_COPY_MOVE(T) DEFAULT_COPY(T) DEFAULT_MOVE(T)
 #define DO_WHILE0(code)                                                        \
     do {                                                                       \
         code                                                                   \
@@ -50,19 +57,56 @@ template <uint16_t SegmentBits = 128> class SegmentBitVector {
     friend class SVFIRWriter;
     friend class SVFIRReader;
 
+    template <typename T, size_t Align, size_t Threshold = Align>
+    class AlignedAllocatorWithThreshold : public std::allocator<T> {
+    public:
+        AlignedAllocatorWithThreshold() {}
+        template <class U> struct rebind {
+            using other = AlignedAllocatorWithThreshold<U, Align, Threshold>;
+        };
+
+        /// Removes default initialization behaviour.
+        template <class U> void construct(U* p) noexcept {}
+
+        [[nodiscard]] T* allocate(std::size_t n) {
+            const auto nbytes = n * sizeof(T);
+            if (nbytes >= Threshold)
+                return reinterpret_cast<T*>(
+                    ::operator new(nbytes, std::align_val_t{Align}));
+            else return reinterpret_cast<T*>(::operator new(nbytes));
+        }
+
+        void deallocate(T* p, std::size_t n) noexcept {
+            const auto nbytes = n * sizeof(T);
+            if (nbytes >= Threshold)
+                ::operator delete(p, std::align_val_t{Align});
+            else ::operator delete(p);
+        }
+
+        bool operator==(const AlignedAllocatorWithThreshold&) const noexcept {
+            return true;
+        }
+        bool operator!=(const AlignedAllocatorWithThreshold&) const noexcept {
+            return false;
+        }
+    };
+
 public:
     using UnitType = uint64_t;
     static constexpr size_t UnitBits = sizeof(UnitType) * 8;
     static constexpr size_t UnitsPerSegment = SegmentBits / UnitBits;
 
-    struct alignas(uint64_t) Segment {
+    struct Segment {
         UnitType data[UnitsPerSegment];
 
-        Segment() = default;
+        /// Default constructor. data is uninitialized.
+        Segment() noexcept {}
         /// Initialize segment with only one bit set.
-        Segment(size_t index) : data{} {
+        Segment(size_t index) noexcept : data{} {
             set(index);
         }
+
+        DEFAULT_COPY_MOVE(Segment);
 
         /// Returns true if all bits are zero.
         bool empty() const noexcept {
@@ -138,8 +182,12 @@ public:
     // };
 
 protected:
-    std::vector<index_t> indexes;
-    std::vector<Segment> data;
+    using index_container =
+        std::vector<index_t, AlignedAllocatorWithThreshold<index_t, 64>>;
+    using data_container =
+        std::vector<Segment, AlignedAllocatorWithThreshold<Segment, 64>>;
+    index_container indexes;
+    data_container data;
 
     // std::vector<IndexedSegment> values;
     /// Returns # of segments.
@@ -191,9 +239,9 @@ public:
         index_t cur_pos;
 
     protected:
-        typename std::vector<index_t>::const_iterator indexIt;
-        typename std::vector<index_t>::const_iterator indexEnd;
-        typename std::vector<Segment>::const_iterator valueIt;
+        typename index_container::const_iterator indexIt;
+        typename index_container::const_iterator indexEnd;
+        typename data_container::const_iterator dataIt;
         unsigned char unit_index; // unit index in the current segment
         unsigned char bit_index;  // bit index in the current unit
         bool end;
@@ -203,7 +251,7 @@ public:
             if (++unit_index == UnitsPerSegment) {
                 // forward to next segment
                 unit_index = 0;
-                ++indexIt, ++valueIt;
+                ++indexIt, ++dataIt;
                 if (indexIt == indexEnd)
                     // reached the end
                     end = true;
@@ -220,7 +268,7 @@ public:
         void search() {
             while (!end) {
                 auto mask = ~((static_cast<UnitType>(1) << bit_index) - 1);
-                auto masked_unit = valueIt->data[unit_index] & mask;
+                auto masked_unit = dataIt->data[unit_index] & mask;
                 static_assert(
                     sizeof(UnitType) == 8,
                     "UnitType must be 64 bits, or _tzcnt_u64 can't be used");
@@ -247,19 +295,12 @@ public:
               indexEnd(vec.indexes.end()), end(end | vec.empty()) {
             if (end) return;
             indexIt = vec.indexes.begin();
-            valueIt = vec.data.begin();
+            dataIt = vec.data.begin();
             unit_index = 0;
             bit_index = 0;
             search();
         }
-        SegmentBitVectorIterator(const SegmentBitVectorIterator& other) =
-            default;
-        SegmentBitVectorIterator& operator=(
-            const SegmentBitVectorIterator& other) = default;
-        SegmentBitVectorIterator(SegmentBitVectorIterator&& other) noexcept =
-            default;
-        SegmentBitVectorIterator& operator=(
-            SegmentBitVectorIterator&& other) noexcept = default;
+        DEFAULT_COPY_MOVE(SegmentBitVectorIterator);
 
         reference operator*() const {
             return cur_pos;
@@ -535,409 +576,7 @@ public:
         return !(*this == rhs);
     }
 
-    // TODO: improve
-    bool union_simd(const SegmentBitVector& rhs) {
-        const auto this_size = size(), rhs_size = rhs.size();
-        size_t valid_count = 0, this_i = 0, rhs_i = 0;
-        bool changed = false;
-        const auto source_rhs_mark = _mm512_set1_epi32(0b1'0000);
-        const auto reserved_extract_mask = _mm512_set1_epi32(0b1'1111);
-        const auto offset_extract_mask = _mm512_set1_epi32(0b0'1111);
-        /// store into merged vector to mark position
-        const auto offset_info_this_u32x16 = _mm512_setr_epi32(
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        const auto offset_info_rhs_u32x16 = _mm512_setr_epi32(
-            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
-        const auto u64x8_dup_from_u64x4 =
-            _mm512_setr_epi64(0, 0, 1, 1, 2, 2, 3, 3);
-        const auto max =
-            _mm512_set1_epi32(std::numeric_limits<uint32_t>::max());
-        const auto offset_1_permutex2 = _mm512_setr_epi32(
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
-        /// the integers at 1, 3, 5, 7 are set to 8. 0 otherwise
-        const auto odd_8 = _mm512_maskz_set1_epi64(0b1010'1010, 8);
-        const auto seg_size = _mm512_set1_epi32(sizeof(Segment));
-
-        // std::vector<index_t> this_index_copy = indexes;
-        // std::vector<Segment> this_data_copy = data;
-        auto this_index_copy_raw =
-            (index_t*)std::malloc(this_size * sizeof(index_t));
-        std::memcpy(this_index_copy_raw, indexes.data(),
-                    this_size * sizeof(index_t));
-        auto this_data_copy_raw =
-            (Segment*)std::malloc(this_size * sizeof(Segment));
-        std::memcpy(this_data_copy_raw, data.data(),
-                    this_size * sizeof(Segment));
-        // Calling clear() does not affect the result of capacity().
-        indexes.clear(), data.clear();
-        alignas(64) Segment sorted_data[32];
-        while (this_i + 16 <= this_size && rhs_i + 16 <= rhs_size) {
-            // pack indexes[this_i..this_i + 16), rhs.indexes[rhs_i..rhs_i + 16)
-            // into a avx512 vector register (u32x16)
-            const auto v_this_idx =
-                           _mm512_loadu_epi32(&this_index_copy_raw[this_i]),
-                       v_rhs_idx =
-                           _mm512_loadu_epi32(rhs.indexes.data() + rhs_i);
-
-            const auto rangemax_this =
-                           _mm512_set1_epi32(this_index_copy_raw[this_i + 15]),
-                       rangemax_rhs =
-                           _mm512_set1_epi32(rhs.indexes[rhs_i + 15]);
-
-            const auto lemask_this =
-                           _mm512_cmple_epu32_mask(v_this_idx, rangemax_rhs),
-                       lemask_rhs =
-                           _mm512_cmple_epu32_mask(v_rhs_idx, rangemax_this);
-
-            // for those elements can't advance now, don't compare (skip
-            // processing in this iteration)
-            const auto v_this_masked = _mm512_mask_blend_epi32(lemask_this, max,
-                                                               v_this_idx),
-                       v_rhs_masked =
-                           _mm512_mask_blend_epi32(lemask_rhs, max, v_rhs_idx);
-
-            // number of indexes that can advance, each <= 16
-            const auto advance_this = 32 - _lzcnt_u32(lemask_this),
-                       advance_rhs = 32 - _lzcnt_u32(lemask_rhs);
-
-            // since `index` is multiple of SegmentBits, there are some bits
-            // left to store the origin position
-            // | 27 bits | 1 bit source | 4 bits offset |
-            static_assert(
-                SegmentBits >= 1 << 5,
-                "5 bits are required to sort the index along with value");
-
-            /// add source, offset info to the indexes
-            const auto v_this_marked = _mm512_or_epi32(v_this_masked,
-                                                       offset_info_this_u32x16),
-                       v_rhs_marked = _mm512_or_epi32(v_rhs_masked,
-                                                      offset_info_rhs_u32x16);
-
-            auto sorted_low = v_this_marked, sorted_high = v_rhs_marked;
-            rswap(sorted_low, sorted_high);
-
-            /// the count of valid indexes in sorted result, <=32
-            const auto n_processed = advance_this + advance_rhs;
-            /// the lowest n_valid bits set to 1
-            const uint32_t n_processed_bits = ((uint64_t)1 << n_processed) - 1;
-            const uint16_t n_processed_bits_low = n_processed_bits,
-                           n_processed_bits_high = n_processed_bits >> 16;
-
-            /// set bits[0..=4] to 0
-            const auto sorted_real_index_low = _mm512_andnot_epi32(
-                           reserved_extract_mask, sorted_low),
-                       sorted_real_index_high = _mm512_andnot_epi32(
-                           reserved_extract_mask, sorted_high);
-            /// shift left u32x1
-            const auto sorted_real_index_low_offset1 =
-                           _mm512_permutex2var_epi32(sorted_real_index_low,
-                                                     offset_1_permutex2,
-                                                     sorted_real_index_high),
-                       sorted_real_index_high_offset1 =
-                           _mm512_permutex2var_epi32(sorted_real_index_high,
-                                                     offset_1_permutex2,
-                                                     sorted_real_index_high);
-            /// whether each index is equal to the next. 0 if invalid
-            const uint16_t index_equal_mask_low = _mm512_mask_cmpeq_epi32_mask(
-                               n_processed_bits_low, sorted_real_index_low,
-                               sorted_real_index_low_offset1),
-                           index_equal_mask_high = _mm512_mask_cmpeq_epi32_mask(
-                               n_processed_bits_high, sorted_real_index_high,
-                               sorted_real_index_high_offset1);
-            const uint32_t index_equal_mask =
-                index_equal_mask_low | (index_equal_mask_high << 16);
-            /// whether each index is valid (0 if merge into prev | skipped)
-            const uint32_t index_valid_mask =
-                ~((uint64_t)index_equal_mask << 1) & n_processed_bits;
-
-            /// extract offset (4 bits)
-            const auto offset_val_low = _mm512_maskz_and_epi32(
-                           n_processed_bits_low, sorted_low,
-                           offset_extract_mask),
-                       offset_val_high = _mm512_maskz_and_epi32(
-                           n_processed_bits_high, sorted_high,
-                           offset_extract_mask);
-            /// offset in bytes
-            const auto offset_bytes_low =
-                           _mm512_mullo_epi32(offset_val_low, seg_size),
-                       offset_bytes_high =
-                           _mm512_mullo_epi32(offset_val_high, seg_size);
-
-            static_assert(sizeof(std::byte*) == sizeof(uint64_t),
-                          "64-bit address required");
-
-            const auto rhs_base_addr_diff =
-                reinterpret_cast<const std::byte*>(&rhs.data_at(rhs_i)) -
-                reinterpret_cast<const std::byte*>(&this_data_copy_raw[this_i]);
-            const auto rhs_base_addr_diff_u64x8 =
-                _mm512_set1_epi64(rhs_base_addr_diff);
-            /// bits[i] = 1 iif come from rhs && valid
-            const auto come_from_rhs_low = _mm512_mask_test_epi32_mask(
-                           n_processed_bits_low, sorted_low, source_rhs_mark),
-                       come_from_rhs_high = _mm512_mask_test_epi32_mask(
-                           n_processed_bits_high, sorted_high, source_rhs_mark);
-            const uint32_t come_from_rhs =
-                come_from_rhs_low | (come_from_rhs_high << 16);
-
-            //  Sort the data: Gather from correct mem address, then store
-            //  contiguously
-            REPEAT_4(i, 0, {
-                if (i * 8 < n_processed) {
-                    const auto cur_offset_bytes_u32x8 =
-                        _mm512_extracti32x8_epi32(i < 2 ? offset_bytes_low
-                                                        : offset_bytes_high,
-                                                  i % 2);
-                    /// we must use u64 for address
-                    const auto cur_offset_bytes_u64x8 =
-                        _mm512_cvtepu32_epi64(cur_offset_bytes_u32x8);
-                    const auto seg_addr_offset_u64x8 = _mm512_mask_add_epi64(
-                        cur_offset_bytes_u64x8, come_from_rhs >> (i * 8),
-                        cur_offset_bytes_u64x8, rhs_base_addr_diff_u64x8);
-                    REPEAT_2(j, 0, {
-                        if (i * 8 + j * 4 < n_processed) {
-                            const auto data_addr_offset_u64x4 =
-                                _mm512_extracti64x4_epi64(seg_addr_offset_u64x8,
-                                                          j);
-                            /// from a,b,c,d,e,f,g,h to a,a,b,b,...,h,h
-                            const auto data_addr_offset_dup_u64x8 =
-                                _mm512_permutexvar_epi64(
-                                    u64x8_dup_from_u64x4,
-                                    _mm512_castsi256_si512(
-                                        data_addr_offset_u64x4));
-                            /// add 8 (bytes) to odd elements
-                            const auto data_addr_offset_u64x8 =
-                                _mm512_add_epi64(data_addr_offset_dup_u64x8,
-                                                 odd_8);
-
-                            // REPEAT_8(k, 0, {
-                            //     std::memcpy(&sorted_data[i * 8 + j * 4 + k],
-                            //                 reinterpret_cast<const
-                            //                 std::byte*>(
-                            //                     &this_data_copy_raw[this_i])
-                            //                     + data_addr_offset_u64x8[k],
-                            //                 sizeof(Segment));
-                            // });
-                            const auto data_gathered_u64x8_segx4 =
-                                _mm512_i64gather_epi64(
-                                    data_addr_offset_u64x8,
-                                    &this_data_copy_raw[this_i], 1);
-                            _mm512_store_epi64(&sorted_data[i * 8 + j * 4],
-                                               data_gathered_u64x8_segx4);
-                        }
-                    });
-                }
-            });
-
-            int valid_segs = 0;
-            // load sorted data, compute OR, store result
-            REPEAT_8(i, 0, {
-                if (i * 4 < n_processed) {
-                    const auto cur_sorted_data_u64x8 =
-                        _mm512_loadu_epi64(&sorted_data[i * 4]);
-                    const auto sorted_data_offset_u64x8 =
-                        _mm512_loadu_epi64(&sorted_data[i * 4 + 1]);
-
-                    /// whether cur segment should use OR result (otherwise
-                    /// ignored or use as-is)
-                    const uint8_t use_merged_mask =
-                        (index_equal_mask >> (i * 4)) & 0xf;
-                    /// whether cur segment is valid (0 if merged into prev)
-                    const uint8_t valid_mask =
-                        (index_valid_mask >> (i * 4)) & 0xf;
-                    if (!changed) {
-                        /// whether cur segment comes from rhs
-                        const uint8_t rhs_mask =
-                            (come_from_rhs >> (i * 4)) & 0xf;
-                        // any rhs element is added (without OR)
-                        changed = rhs_mask & valid_mask & ~use_merged_mask;
-                    }
-
-                    /// OR result of current segment with next (sorted)
-                    const auto or_result = _mm512_or_epi64(
-                        cur_sorted_data_u64x8, sorted_data_offset_u64x8);
-                    if (!changed) {
-                        /// whether cur u64 is changed
-                        const uint8_t eq_mask = _mm512_cmpeq_epu64_mask(
-                            or_result, cur_sorted_data_u64x8);
-                        /// bits[2k] := bits[2k] & bits[2k + 1]
-                        const uint8_t seg_eq_mask =
-                            eq_mask & ((eq_mask & 0b1010'1010) >> 1);
-                        /// whether cur segment is unchanged (compress bits[2k]
-                        /// into bits[k])
-                        const auto seg_eq = _pext_u32(seg_eq_mask, 0b0101'0101);
-                        // cur seg is valid && changed && should use OR merged
-                        // one
-                        changed = valid_mask & use_merged_mask & ~seg_eq;
-                    }
-                    // NOTE: OR can't produce all-zero Segment
-                    const auto data_to_store = _mm512_mask_blend_epi64(
-                        duplicate_bits(use_merged_mask), cur_sorted_data_u64x8,
-                        or_result);
-                    _mm512_mask_compressstoreu_epi64(&sorted_data[valid_segs],
-                                                     duplicate_bits(valid_mask),
-                                                     data_to_store);
-                    valid_segs += _mm_popcnt_u32(valid_mask);
-                }
-            });
-            indexes.resize(indexes.size() + valid_segs);
-            const auto n_valid_index_in_low =
-                _mm_popcnt_u32(index_valid_mask & 0xffff);
-            _mm512_mask_compressstoreu_epi32(
-                &indexes[valid_count], index_valid_mask, sorted_real_index_low);
-            _mm512_mask_compressstoreu_epi32(
-                &indexes[valid_count + n_valid_index_in_low],
-                index_valid_mask >> 16, sorted_real_index_high);
-            data.resize(data.size() + valid_segs);
-            std::memcpy(&data[valid_count], sorted_data,
-                        sizeof(Segment) * valid_segs);
-            this_i += advance_this, rhs_i += advance_rhs;
-            valid_count += valid_segs;
-        }
-        // deal with remaining elements
-        while (this_i < this_size && rhs_i < rhs_size) {
-            const auto this_ind = this_index_copy_raw[this_i];
-            const auto rhs_ind = rhs.index_at(rhs_i);
-            if (this_ind < rhs_ind) {
-                indexes.emplace_back(this_ind);
-                data.emplace_back(this_data_copy_raw[this_i]);
-                ++valid_count;
-                ++this_i;
-            } else if (this_ind > rhs_ind) {
-                // copy current rhs segment to this
-                indexes.emplace_back(rhs_ind);
-                data.emplace_back(rhs.data_at(rhs_i));
-                ++valid_count;
-                changed = true;
-                ++rhs_i;
-            } else {
-                indexes.emplace_back(this_ind);
-                auto& inserted_data =
-                    data.emplace_back(this_data_copy_raw[this_i]);
-                changed |= (inserted_data |= rhs.data_at(rhs_i));
-                ++valid_count;
-                ++this_i, ++rhs_i;
-            }
-        }
-        if (rhs_i < rhs_size) {
-            // append remaining elements from rhs
-            push_back_till_end(rhs, rhs_i);
-            changed = true;
-        } else if (this_i < this_size) {
-            // append remaining elements from this
-            indexes.insert(indexes.end(), this_index_copy_raw + this_i,
-                           this_index_copy_raw + this_size);
-            data.insert(data.end(), this_data_copy_raw + this_i,
-                        this_data_copy_raw + this_size);
-        }
-        std::free(this_index_copy_raw);
-        std::free(this_data_copy_raw);
-        return changed;
-    }
-
-    bool union_simd2(const SegmentBitVector& rhs) {
-        // works similar to `diff_simd`.
-        // Update `this` inplace, and add extra segments if needed.
-        const auto this_size = size(), rhs_size = rhs.size();
-        size_t this_i = 0, rhs_i = 0;
-        bool changed = false;
-        while (this_i + 16 <= this_size && rhs_i + 16 <= rhs_size) {
-            /// indexes[this_i..this_i + 16]
-            const auto v_this_idx = _mm512_loadu_epi32(indexes.data() + this_i),
-                       v_rhs_idx =
-                           _mm512_loadu_epi32(rhs.indexes.data() + rhs_i);
-            /// whether each u32 matches (exist in both vectors)
-            uint16_t match_this, match_rhs;
-            ne_mm512_2intersect_epi32(v_this_idx, v_rhs_idx, match_this,
-                                      match_rhs);
-
-            /// the maximum index in current range [this_i..=this_i + 15],
-            /// spread to vector register
-            const auto rangemax_this = _mm512_set1_epi32(index_at(this_i + 15)),
-                       rangemax_rhs =
-                           _mm512_set1_epi32(rhs.index_at(rhs_i + 15));
-            /// whether each u32 index is less than or equal to
-            /// the maximum index in current range of the other vector
-            const uint16_t lemask_this = _mm512_cmple_epu32_mask(v_this_idx,
-                                                                 rangemax_rhs),
-                           lemask_rhs = _mm512_cmple_epu32_mask(v_rhs_idx,
-                                                                rangemax_this);
-            /// the number to increase for this_i / rhs_i
-            const auto advance_this = 32 - _lzcnt_u32(lemask_this),
-                       advance_rhs = 32 - _lzcnt_u32(lemask_rhs);
-
-            // align matched data of rhs to the shape of this.
-            // we don't care unmatched position
-            auto matched_this_temp = match_this, matched_rhs_temp = match_rhs;
-            Segment rhs_data_temp[512 / (sizeof(index_t) * 8)];
-            auto rhs_data_temp_addr = rhs_data_temp,
-                 rhs_data_addr = &rhs.data_at(rhs_i);
-            while (matched_this_temp) {
-                const auto this_pad = _tzcnt_u32(matched_this_temp),
-                           rhs_pad = _tzcnt_u32(matched_rhs_temp);
-                rhs_data_temp_addr += this_pad, rhs_data_addr += rhs_pad;
-                *rhs_data_temp_addr = *rhs_data_addr;
-                matched_this_temp >>= this_pad + 1,
-                    matched_rhs_temp >>= rhs_pad + 1;
-                ++rhs_data_temp_addr, ++rhs_data_addr;
-            }
-
-            /// each u32 index match => 2*u64 (data) to store & compute
-            auto dup_this = duplicate_bits(match_this);
-            const uint16_t advance_this_to_bits =
-                ((uint32_t)1 << advance_this) - 1;
-            const auto dup_advance_this = duplicate_bits(advance_this_to_bits);
-
-            // compute OR result of matched segments
-            REPEAT_i_4({
-                /// matched & ordered 4 segments (8 u64) from memory. zero in
-                /// case of out of bounds
-                const auto v_this = _mm512_maskz_loadu_epi64(
-                    dup_advance_this >> (i * 8), &data_at(this_i) + i * 4);
-                const auto v_rhs = _mm512_maskz_loadu_epi64(
-                    dup_this >> (i * 8), &rhs_data_temp[i * 4]);
-                const auto or_result = _mm512_or_epi64(v_this, v_rhs);
-
-                if (!changed) // compute `changed` if not already set
-                    changed = !avx_vec<512>::eq_cmp(v_this, or_result);
-
-                _mm512_mask_storeu_epi64(data.data() + this_i + i * 4,
-                                         dup_advance_this >> (i * 8),
-                                         or_result);
-            });
-            _mm512_mask_storeu_epi32(indexes.data() + this_i, dup_advance_this,
-                                     v_this_idx);
-            this_i += advance_this, rhs_i += advance_rhs;
-        }
-
-        size_t unprocessed_this_idx = this_i;
-        // deal with remaining | extra elements
-        size_t this_j = 0, rhs_j = 0;
-        while (this_j < size() && rhs_j < rhs_size) {
-            const auto this_ind = index_at(this_j);
-            const auto rhs_ind = rhs.index_at(rhs_j);
-            if (this_ind < rhs_ind) ++this_j;
-            else if (this_ind > rhs_ind) {
-                // copy current rhs segment to this
-                emplace_at(this_j, rhs_ind, rhs.data_at(rhs_j));
-                changed = true;
-                if (this_j <= unprocessed_this_idx) ++unprocessed_this_idx;
-                ++this_j, ++rhs_j;
-            } else {                                // this_ind == rhs_ind
-                if (this_j >= unprocessed_this_idx) // not processed by SIMD
-                    changed |= (data_at(this_j) |= rhs.data_at(rhs_j));
-                ++this_j, ++rhs_j;
-            }
-        }
-        if (rhs_j < rhs_size) {
-            // append remaining elements from rhs
-            push_back_till_end(rhs, rhs_j);
-            changed = true;
-        }
-        return changed;
-    }
-
     bool union_simd3(const SegmentBitVector& rhs) {
-        // works similar to `union_simd2`.
         // Update `this` inplace, save extra segments to temp
         const auto this_size = size(), rhs_size = rhs.size();
         size_t this_i = 0, rhs_i = 0;
@@ -948,7 +587,7 @@ public:
         Segment* extra_segments =
             (Segment*)std::malloc(sizeof(Segment) * rhs_size);
 
-        Segment rhs_data_temp[512 / (sizeof(index_t) * 8)];
+        alignas(64) Segment rhs_data_temp[512 / (sizeof(index_t) * 8)];
         while (this_i + 16 <= this_size && rhs_i + 16 <= rhs_size) {
             /// indexes[this_i..this_i + 16]
             const auto v_this_idx = _mm512_loadu_epi32(indexes.data() + this_i),
@@ -1312,6 +951,7 @@ public:
         const auto this_size = size(), rhs_size = rhs.size();
         size_t valid_count = 0, this_i = 0, rhs_i = 0;
         bool changed = false;
+        alignas(64) Segment rhs_data_temp[512 / (sizeof(index_t) * 8)];
         while (this_i + 16 <= this_size && rhs_i + 16 <= rhs_size) {
             /// indexes[this_i..this_i + 16]
             const auto v_this_idx = _mm512_loadu_epi32(indexes.data() + this_i),
@@ -1340,7 +980,6 @@ public:
             // align matched data of rhs to the shape of this.
             // we don't care unmatched position
             auto matched_this_temp = match_this, matched_rhs_temp = match_rhs;
-            Segment rhs_data_temp[512 / (sizeof(index_t) * 8)];
             auto rhs_data_temp_addr = rhs_data_temp,
                  rhs_data_addr = &rhs.data_at(rhs_i);
             while (matched_this_temp) {
