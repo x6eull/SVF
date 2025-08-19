@@ -6,8 +6,13 @@
 
 #include <cstdint>
 #include <immintrin.h>
+#include <type_traits>
 
 #define _inline inline __attribute__((always_inline))
+template <typename> struct dependent_false : std::false_type {};
+#define STATIC_ASSERT_FAIL(message)                                            \
+    static_assert(dependent_false<T>::value, message);                         \
+    __builtin_unreachable();
 
 _inline static uint16_t rol16(const uint16_t x, const int n) {
     return (x << n) | (x >> (16 - n));
@@ -189,11 +194,11 @@ template <unsigned short BitWidth> _inline bool testz(const void* addr) {
 }
 
 namespace SIMD::bit {
+#define UNSUPPORTED_TYPE STATIC_ASSERT_FAIL("Unsupported type");
 // the following functions return `int` as well as header <bit>
 // TODO: use bit manipulation functions from std (C++20)
 template <typename T> _inline int popcnt(T value) {
-    static_assert(false, "Unsupported type");
-    __builtin_unreachable();
+    UNSUPPORTED_TYPE
 }
 template <> _inline int popcnt<uint32_t>(uint32_t value) {
     return _mm_popcnt_u32(value);
@@ -203,16 +208,14 @@ template <> _inline int popcnt<uint64_t>(uint64_t value) {
 }
 
 template <typename T> _inline int lzcnt(T value) {
-    static_assert(false, "Unsupported type");
-    __builtin_unreachable();
+    UNSUPPORTED_TYPE
 }
 template <> _inline int lzcnt<uint16_t>(uint16_t value) {
     return 32 - _lzcnt_u32(value);
 }
 
 template <typename T> _inline int tzcnt(T value) {
-    static_assert(false, "Unsupported type");
-    __builtin_unreachable();
+    UNSUPPORTED_TYPE
 }
 template <> _inline int tzcnt<uint16_t>(uint16_t value) {
     return _tzcnt_u32(value);
