@@ -4,11 +4,8 @@
 
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
 #include <immintrin.h>
-
-#include "avx_mergesort.h"
 
 #define _inline inline __attribute__((always_inline))
 
@@ -33,7 +30,7 @@ _inline uint32_t duplicate_bits(uint16_t from) {
 /// "ne" means native or emulated. Requires AVX512F.
 _inline void ne_mm512_2intersect_epi32(const __m512i& a, const __m512i& b,
                                        __mmask16& k1, __mmask16& k2) {
-#if __AVX512VP2INTERSECT__ 
+#if __AVX512VP2INTERSECT__
     _mm512_2intersect_epi32(a, b, &k1, &k2);
 #else // From https://arxiv.org/abs/2112.06342
     static_assert(__AVX512F__, "AVX512F is required for this operation");
@@ -191,30 +188,39 @@ template <unsigned short BitWidth> _inline bool testz(const void* addr) {
     return avx_vec<BitWidth>::is_zero(v);
 }
 
-/// Count bits set(logical 1) in a contiguous memory region.
-template <unsigned short BitWidth>
-_inline uint32_t popcnt(const void* addr, size_t count) {
-    if (count == 0) return 0;
-    const auto v0 = avx_vec<BitWidth>::load(addr);
-    auto c = avx_vec<BitWidth>::popcnt(v0);
-    const auto* cur_addr =
-        reinterpret_cast<const typename avx_vec<BitWidth>::data_t*>(addr);
-    for (size_t i = 1; i < count; i++) {
-        cur_addr++;
-        const auto curv = avx_vec<BitWidth>::load(cur_addr);
-        const auto curc = avx_vec<BitWidth>::popcnt(curv);
-        c = avx_vec<BitWidth>::add_op(c, curc);
-    }
-    return avx_vec<BitWidth>::reduce_add(c);
+namespace SIMD::bit {
+// the following functions return `int` as well as header <bit>
+// TODO: use bit manipulation functions from std (C++20)
+template <typename T> _inline int popcnt(T value) {
+    static_assert(false, "Unsupported type");
+    __builtin_unreachable();
 }
-template <> _inline uint32_t popcnt<64>(const void* addr, size_t size) {
-    uint32_t result = 0;
-    auto arr = reinterpret_cast<const uint64_t*>(addr);
-    for (size_t i = 0; i < size; ++i, ++arr) {
-        result += _mm_popcnt_u64(*arr);
-    }
-    return result;
+template <> _inline int popcnt<uint32_t>(uint32_t value) {
+    return _mm_popcnt_u32(value);
 }
+template <> _inline int popcnt<uint64_t>(uint64_t value) {
+    return _mm_popcnt_u64(value);
+}
+
+template <typename T> _inline int lzcnt(T value) {
+    static_assert(false, "Unsupported type");
+    __builtin_unreachable();
+}
+template <> _inline int lzcnt<uint16_t>(uint16_t value) {
+    return 32 - _lzcnt_u32(value);
+}
+
+template <typename T> _inline int tzcnt(T value) {
+    static_assert(false, "Unsupported type");
+    __builtin_unreachable();
+}
+template <> _inline int tzcnt<uint16_t>(uint16_t value) {
+    return _tzcnt_u32(value);
+}
+template <> _inline int tzcnt<uint64_t>(uint64_t value) {
+    return _tzcnt_u64(value);
+}
+} // namespace SIMD::bit
 
 /// Returns true if all bits in v2 are set in v1. (that is, v1 contains v2)
 template <unsigned short BitWidth>
@@ -239,18 +245,6 @@ _inline bool cmpeq(const void* addr1, const void* addr2) {
     const auto v1 = avx_vec<BitWidth>::load(addr1);
     const auto v2 = avx_vec<BitWidth>::load(addr2);
     return avx_vec<BitWidth>::eq_cmp(v1, v2);
-}
-
-_inline bool cmpeq(const uint64_t* addr1, const uint64_t* addr2,
-                   const size_t size_i64) {
-    size_t i = 0;
-    for (; size_i64 >= i + 8; i += 8, addr1 += 8, addr2 += 8)
-        if (!cmpeq<512>(addr1, addr2)) return false;
-    // avoid branching
-    const __mmask8 rest_count = size_i64 - i;
-    const __mmask8 rest_eq_mask = _mm512_mask_cmpeq_epi64_mask(
-        rest_count, _mm512_loadu_si512(addr1), _mm512_loadu_si512(addr2));
-    return rest_count == rest_eq_mask;
 }
 
 /// Bitwise OR operation on two memory regions,

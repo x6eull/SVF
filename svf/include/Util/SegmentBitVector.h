@@ -40,17 +40,30 @@
 #define REPEAT_i_2(block) REPEAT_2(i, 0, block)
 #define REPEAT_i_4(block) REPEAT_4(i, 0, block)
 
-/// Returns a __m512i that contains 32*16-bit integers in ascending order,
+/// A 512-bit vector contains 32*16-bit integers in ascending order,
 /// that is, {0, 1, 2, ..., 31} (from e0 to e31).
-static inline auto get_asc_indexes() {
-    return _mm512_set_epi16(31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19,
-                            18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5,
-                            4, 3, 2, 1, 0);
-}
+static const auto asc_indexes =
+    _mm512_set_epi16(31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17,
+                     16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
 
 static inline size_t szudzik(size_t a, size_t b) {
     return a > b ? b * b + a : a * a + a + b;
 }
+
+#define ADV_COUNT                                                              \
+    /**the maximum index in current range [this_i..=this_i + 15], spread to    \
+     * vector register */                                                      \
+    const auto rangemax_this = _mm512_set1_epi32(index_at(this_i + 15)),       \
+               rangemax_rhs = _mm512_set1_epi32(rhs.index_at(rhs_i + 15));     \
+    /**whether each u32 index is less than or equal to the maximum index in    \
+     * current range of the other vector */                                    \
+    const uint16_t lemask_this =                                               \
+                       _mm512_cmple_epu32_mask(v_this_idx, rangemax_rhs),      \
+                   lemask_rhs =                                                \
+                       _mm512_cmple_epu32_mask(v_rhs_idx, rangemax_this);      \
+    /**the number to increase for this_i / rhs_i, <= 16 */                     \
+    const auto advance_this = SIMD::bit::lzcnt(lemask_this),                   \
+               advance_rhs = SIMD::bit::lzcnt(lemask_rhs);
 
 namespace SVF {
 template <uint16_t SegmentBits = 128> class SegmentBitVector {
@@ -60,7 +73,7 @@ template <uint16_t SegmentBits = 128> class SegmentBitVector {
     template <typename T, size_t Align, size_t Threshold = Align>
     class AlignedAllocatorWithThreshold : public std::allocator<T> {
     public:
-        AlignedAllocatorWithThreshold() {}
+        AlignedAllocatorWithThreshold() noexcept {}
         template <class U> struct rebind {
             using other = AlignedAllocatorWithThreshold<U, Align, Threshold>;
         };
@@ -93,8 +106,8 @@ template <uint16_t SegmentBits = 128> class SegmentBitVector {
 
 public:
     using UnitType = uint64_t;
-    static constexpr size_t UnitBits = sizeof(UnitType) * 8;
-    static constexpr size_t UnitsPerSegment = SegmentBits / UnitBits;
+    static constexpr uint16_t UnitBits = sizeof(UnitType) * 8;
+    static constexpr uint16_t UnitsPerSegment = SegmentBits / UnitBits;
 
     struct Segment {
         UnitType data[UnitsPerSegment];
@@ -169,17 +182,9 @@ public:
             return ::diff_inplace<SegmentBits>(data, rhs.data);
         }
     };
-    static_assert(sizeof(Segment) == SegmentBits / 8);
+    static_assert(sizeof(Segment) * 8 == SegmentBits);
 
     using index_t = uint32_t;
-    // struct IndexedSegment {
-    //     index_t index;
-    //     Segment data;
-    //     IndexedSegment() = default;
-    //     template <typename... Args>
-    //     IndexedSegment(index_t index, Args&&... seg)
-    //         : index(index), data(std::forward<Args>(seg)...) {}
-    // };
 
 protected:
     using index_container =
@@ -189,43 +194,32 @@ protected:
     index_container indexes;
     data_container data;
 
-    // std::vector<IndexedSegment> values;
     /// Returns # of segments.
-    inline __attribute__((always_inline)) size_t size() const noexcept {
+    _inline size_t size() const noexcept {
         return indexes.size();
     }
-    inline __attribute__((always_inline)) index_t
-    index_at(size_t i) const noexcept {
+    _inline index_t index_at(size_t i) const noexcept {
         return indexes[i];
     }
-    inline __attribute__((always_inline)) Segment& data_at(size_t i) noexcept {
+    _inline Segment& data_at(size_t i) noexcept {
         return data[i];
     }
-    inline __attribute__((always_inline)) const Segment& data_at(
-        size_t i) const noexcept {
+    _inline const Segment& data_at(size_t i) const noexcept {
         return data[i];
     }
-    inline __attribute__((always_inline)) void erase_at(size_t i) noexcept {
+    _inline void erase_at(size_t i) noexcept {
         indexes.erase(indexes.begin() + i);
         data.erase(data.begin() + i);
     }
-    inline __attribute__((always_inline)) void truncate(
-        size_t keep_count) noexcept {
+    _inline void truncate(size_t keep_count) noexcept {
         indexes.resize(keep_count);
         data.resize(keep_count);
     }
     template <typename... Args>
-    inline __attribute__((always_inline)) void emplace_at(
-        size_t i, const index_t& ind, Args&&... seg) noexcept {
+    _inline void emplace_at(size_t i, const index_t& ind,
+                            Args&&... seg) noexcept {
         indexes.emplace(indexes.begin() + i, ind);
         data.emplace(data.begin() + i, std::forward<Args>(seg)...);
-    }
-    inline __attribute__((always_inline)) void push_back_till_end(
-        const SegmentBitVector& rhs, size_t other_offset) noexcept {
-        indexes.insert(indexes.end(), rhs.indexes.begin() + other_offset,
-                       rhs.indexes.end());
-        data.insert(data.end(), rhs.data.begin() + other_offset,
-                    rhs.data.end());
     }
 
 public:
@@ -259,20 +253,16 @@ public:
         }
         /// Increment the bit index (mark the current bit as visited).
         void incr_bit() {
-            if (++bit_index == UnitBits) {
+            if (++bit_index == UnitBits)
                 // forward to next unit
                 incr_unit();
-            }
         }
         /// Start from current position and search for the next set bit
         void search() {
             while (!end) {
                 auto mask = ~((static_cast<UnitType>(1) << bit_index) - 1);
                 auto masked_unit = dataIt->data[unit_index] & mask;
-                static_assert(
-                    sizeof(UnitType) == 8,
-                    "UnitType must be 64 bits, or _tzcnt_u64 can't be used");
-                auto tz_count = _tzcnt_u64(masked_unit);
+                auto tz_count = SIMD::bit::tzcnt(masked_unit);
                 if (tz_count < UnitBits) {
                     // found a set bit
                     bit_index = tz_count;
@@ -379,7 +369,11 @@ public:
         }
         return avx_vec<SegmentBits>::reduce_add(c);
 #else
-        return popcnt<64>(this->data.data(), size() * (sizeof(Segment) / 8));
+        uint32_t result = 0;
+        auto arr = reinterpret_cast<const uint32_t*>(this->data.data());
+        for (size_t i = 0; i < size() * (sizeof(Segment) / 8); ++i, ++arr)
+            result += SIMD::bit::popcnt(*arr);
+        return result;
 #endif
     }
 
@@ -441,7 +435,6 @@ public:
         if (this_size < rhs_size) return false;
 
         size_t this_i = 0, rhs_i = 0;
-        const auto asc_indexes = get_asc_indexes();
         const auto all_zero = _mm512_setzero_si512();
         while (this_i + 16 <= this_size && rhs_i + 16 <= rhs_size) {
             /// indexes[this_i..this_i + 16]
@@ -453,24 +446,10 @@ public:
             ne_mm512_2intersect_epi32(v_this_idx, v_rhs_idx, match_this,
                                       match_rhs);
 
-            /// the maximum index in current range [this_i..=this_i + 15],
-            /// spread to vector register
-            const auto rangemax_this = _mm512_set1_epi32(index_at(this_i + 15)),
-                       rangemax_rhs =
-                           _mm512_set1_epi32(rhs.index_at(rhs_i + 15));
-            /// whether each u32 index is less than or equal to
-            /// the maximum index in current range of the other vector
-            const uint16_t lemask_this = _mm512_cmple_epu32_mask(v_this_idx,
-                                                                 rangemax_rhs),
-                           lemask_rhs = _mm512_cmple_epu32_mask(v_rhs_idx,
-                                                                rangemax_this);
+            ADV_COUNT;
 
             /// count of matched indexes
-            const auto n_matched = (unsigned int)(_mm_popcnt_u32(match_this));
-
-            /// the number to increase for this_i / rhs_i
-            const auto advance_this = 32 - _lzcnt_u32(lemask_this),
-                       advance_rhs = 32 - _lzcnt_u32(lemask_rhs);
+            const auto n_matched = SIMD::bit::popcnt((uint32_t)match_this);
 
             if (advance_rhs > n_matched) return false;
 
@@ -598,43 +577,15 @@ public:
             ne_mm512_2intersect_epi32(v_this_idx, v_rhs_idx, match_this,
                                       match_rhs);
 
-            /// the maximum index in current range [this_i..=this_i + 15],
-            /// spread to vector register
-            const auto rangemax_this = _mm512_set1_epi32(index_at(this_i + 15)),
-                       rangemax_rhs =
-                           _mm512_set1_epi32(rhs.index_at(rhs_i + 15));
-            /// whether each u32 index is less than or equal to
-            /// the maximum index in current range of the other vector
-            const uint16_t lemask_this = _mm512_cmple_epu32_mask(v_this_idx,
-                                                                 rangemax_rhs),
-                           lemask_rhs = _mm512_cmple_epu32_mask(v_rhs_idx,
-                                                                rangemax_this);
-            /// the number to increase for this_i / rhs_i, <= 16
-            const auto advance_this = 32 - _lzcnt_u32(lemask_this),
-                       advance_rhs = 32 - _lzcnt_u32(lemask_rhs);
-
-            // // align matched data of rhs to the shape of this.
-            // // store into extra_* for unmatched & advanced segments
-            // auto matched_this_temp = match_this, matched_rhs_temp =
-            // match_rhs; auto rhs_data_temp_addr = rhs_data_temp,
-            //      rhs_data_addr = &rhs.data_at(rhs_i);
-            // while (matched_this_temp) {
-            //     const auto this_pad = _tzcnt_u32(matched_this_temp),
-            //                rhs_pad = _tzcnt_u32(matched_rhs_temp);
-            //     rhs_data_temp_addr += this_pad, rhs_data_addr += rhs_pad;
-            //     *rhs_data_temp_addr = *rhs_data_addr;
-            //     matched_this_temp >>= this_pad + 1,
-            //         matched_rhs_temp >>= rhs_pad + 1;
-            //     ++rhs_data_temp_addr, ++rhs_data_addr;
-            // }
+            ADV_COUNT;
 
             auto match_this_temp = match_this;
             Segment* store_seg_base = rhs_data_temp;
-            for (uint32_t i = 0; i < advance_rhs; ++i) {
+            for (auto i = 0; i < advance_rhs; ++i) {
                 const auto& rhs_data_cur = rhs.data_at(rhs_i + i);
-                if (match_rhs & // check bits[i]
-                    (1 << i)) { // copy current rhs seg into right pos
-                    const auto this_pad = _tzcnt_u32(match_this_temp);
+                if (match_rhs & (1 << i)) { // check bits[i]
+                    // copy current rhs seg into right pos
+                    const auto this_pad = SIMD::bit::tzcnt(match_this_temp);
                     store_seg_base += this_pad;
                     *store_seg_base = rhs_data_cur;
                     ++store_seg_base;
@@ -782,7 +733,6 @@ public:
         const auto this_size = size(), rhs_size = rhs.size();
         size_t valid_count = 0, this_i = 0, rhs_i = 0;
         bool changed = false;
-        const auto asc_indexes = get_asc_indexes();
         const auto all_zero = _mm512_setzero_si512();
         while (this_i + 16 <= this_size && rhs_i + 16 <= rhs_size) {
             /// indexes[this_i..this_i + 16]
@@ -794,20 +744,7 @@ public:
             ne_mm512_2intersect_epi32(v_this_idx, v_rhs_idx, match_this,
                                       match_rhs);
 
-            /// the maximum index in current range [this_i..=this_i + 15],
-            /// spread to vector register
-            const auto rangemax_this = _mm512_set1_epi32(index_at(this_i + 15)),
-                       rangemax_rhs =
-                           _mm512_set1_epi32(rhs.index_at(rhs_i + 15));
-            /// whether each u32 index is less than or equal to
-            /// the maximum index in current range of the other vector
-            const uint16_t lemask_this = _mm512_cmple_epu32_mask(v_this_idx,
-                                                                 rangemax_rhs),
-                           lemask_rhs = _mm512_cmple_epu32_mask(v_rhs_idx,
-                                                                rangemax_this);
-            /// the number to increase for this_i / rhs_i
-            const auto advance_this = 32 - _lzcnt_u32(lemask_this),
-                       advance_rhs = 32 - _lzcnt_u32(lemask_rhs);
+            ADV_COUNT;
 
             /// compress the intersected data's offset(/8bytes).
             const auto gather_this_offset_u16x32 =
@@ -962,20 +899,7 @@ public:
             ne_mm512_2intersect_epi32(v_this_idx, v_rhs_idx, match_this,
                                       match_rhs);
 
-            /// the maximum index in current range [this_i..=this_i + 15],
-            /// spread to vector register
-            const auto rangemax_this = _mm512_set1_epi32(index_at(this_i + 15)),
-                       rangemax_rhs =
-                           _mm512_set1_epi32(rhs.index_at(rhs_i + 15));
-            /// whether each u32 index is less than or equal to
-            /// the maximum index in current range of the other vector
-            const uint16_t lemask_this = _mm512_cmple_epu32_mask(v_this_idx,
-                                                                 rangemax_rhs),
-                           lemask_rhs = _mm512_cmple_epu32_mask(v_rhs_idx,
-                                                                rangemax_this);
-            /// the number to increase for this_i / rhs_i
-            const auto advance_this = 32 - _lzcnt_u32(lemask_this),
-                       advance_rhs = 32 - _lzcnt_u32(lemask_rhs);
+            ADV_COUNT;
 
             // align matched data of rhs to the shape of this.
             // we don't care unmatched position
@@ -983,8 +907,8 @@ public:
             auto rhs_data_temp_addr = rhs_data_temp,
                  rhs_data_addr = &rhs.data_at(rhs_i);
             while (matched_this_temp) {
-                const auto this_pad = _tzcnt_u32(matched_this_temp),
-                           rhs_pad = _tzcnt_u32(matched_rhs_temp);
+                const auto this_pad = SIMD::bit::tzcnt(matched_this_temp),
+                           rhs_pad = SIMD::bit::tzcnt(matched_rhs_temp);
                 rhs_data_temp_addr += this_pad, rhs_data_addr += rhs_pad;
                 *rhs_data_temp_addr = *rhs_data_addr;
                 matched_this_temp >>= this_pad + 1,
