@@ -62,11 +62,13 @@ static inline size_t szudzik(size_t a, size_t b) {
                    lemask_rhs =                                                \
                        _mm512_cmple_epu32_mask(v_rhs_idx, rangemax_this);      \
     /**the number to increase for this_i / rhs_i, <= 16 */                     \
-    const auto advance_this = SIMD::bit::lzcnt(lemask_this),                   \
-               advance_rhs = SIMD::bit::lzcnt(lemask_rhs);
+    const auto advance_this = 16 - SIMD::bit::lzcnt(lemask_this),              \
+               advance_rhs = 16 - SIMD::bit::lzcnt(lemask_rhs);
 
 namespace SVF {
 template <uint16_t SegmentBits = 128> class SegmentBitVector {
+    static_assert(SegmentBits == 128,
+                  "SegmentBits other than 128 is unsupported currently");
     friend class SVFIRWriter;
     friend class SVFIRReader;
 

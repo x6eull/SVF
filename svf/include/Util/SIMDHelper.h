@@ -211,7 +211,7 @@ template <typename T> _inline int lzcnt(T value) {
     UNSUPPORTED_TYPE
 }
 template <> _inline int lzcnt<uint16_t>(uint16_t value) {
-    return 32 - _lzcnt_u32(value);
+    return _lzcnt_u32(value) - 16;
 }
 
 template <typename T> _inline int tzcnt(T value) {
