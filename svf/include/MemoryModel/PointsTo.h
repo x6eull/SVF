@@ -18,7 +18,7 @@
 #include "Util/BitVector.h"
 #include "Util/CoreBitVector.h"
 #include "Util/SparseBitVector.h"
-#include "Util/SegmentBitVector.h"
+#include "Util/IndexedBlockBitVector.h"
 
 namespace SVF
 {
@@ -34,7 +34,7 @@ public:
         SBV,
         CBV,
         BV,
-        SEGBV
+        IBBV
     };
 
     class PointsToIterator;
@@ -170,8 +170,8 @@ private:
         CoreBitVector cbv;
         /// Bit vector backing.
         BitVector bv;
-        /// Segment bit vector backing.
-        SegmentBitVector<> segbv;
+        /// Indexed block bit vector backing.
+        IndexedBlockBitVector<> ibbv;
     };
 
     /// Type of this points-to set.
@@ -231,7 +231,7 @@ public:
             SparseBitVector<>::iterator sbvIt;
             CoreBitVector::iterator cbvIt;
             BitVector::iterator bvIt;
-            SegmentBitVector<>::iterator segbvIt;
+            IndexedBlockBitVector<>::iterator ibbvIt;
         };
     };
 };

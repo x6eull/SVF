@@ -93,7 +93,7 @@ option(SVF_EXPORT_DYNAMIC "Export all (not only the actually used) symbols to dy
 option(SVF_ENABLE_ASSERTIONS "Always enable debugging assertions, also if the build type is a release build")
 option(SVF_ENABLE_RTTI "Adds -fno-rtti to disable runtime type information (RTTI)" ON)
 option(SVF_ENABLE_EXCEPTIONS "Adds -fno-exceptions to disable exception handling" ON)
-option(SVF_REPLACE_DEFAULT_PT "Replace default points-to set(SparseBitVector) with SegmentBitVector" ON)
+option(SVF_REPLACE_DEFAULT_PT "Replace default points-to set(SparseBitVector) with IndexedBlockBitVector" ON)
 
 # If building dynamic libraries, always enable PIC
 if(SVF_SHARED_LIBS AND NOT SVF_USE_PIC)

@@ -66,9 +66,9 @@ static inline size_t szudzik(size_t a, size_t b) {
                advance_rhs = 16 - SIMD::bit::lzcnt(lemask_rhs);
 
 namespace SVF {
-template <uint16_t SegmentBits = 128> class SegmentBitVector {
-    static_assert(SegmentBits == 128,
-                  "SegmentBits other than 128 is unsupported currently");
+template <uint16_t BlockSize = 128> class IndexedBlockBitVector {
+    static_assert(BlockSize == 128,
+                  "BlockSize other than 128 is unsupported currently");
     friend class SVFIRWriter;
     friend class SVFIRReader;
 
@@ -109,23 +109,23 @@ template <uint16_t SegmentBits = 128> class SegmentBitVector {
 public:
     using UnitType = uint64_t;
     static constexpr uint16_t UnitBits = sizeof(UnitType) * 8;
-    static constexpr uint16_t UnitsPerSegment = SegmentBits / UnitBits;
+    static constexpr uint16_t UnitsPerBlock = BlockSize / UnitBits;
 
-    struct Segment {
-        UnitType data[UnitsPerSegment];
+    struct Block {
+        UnitType data[UnitsPerBlock];
 
         /// Default constructor. data is uninitialized.
-        Segment() noexcept {}
-        /// Initialize segment with only one bit set.
-        Segment(size_t index) noexcept : data{} {
+        Block() noexcept {}
+        /// Initialize block with only one bit set.
+        Block(size_t index) noexcept : data{} {
             set(index);
         }
 
-        DEFAULT_COPY_MOVE(Segment);
+        DEFAULT_COPY_MOVE(Block);
 
         /// Returns true if all bits are zero.
         bool empty() const noexcept {
-            return testz<SegmentBits>(data);
+            return testz<BlockSize>(data);
         }
 
         bool test(size_t index) const noexcept {
@@ -156,76 +156,76 @@ public:
             data[unit_index] &= ~(static_cast<UnitType>(1) << bit_index);
         }
 
-        bool contains(const Segment& rhs) const noexcept {
-            return ::contains<SegmentBits>(data, rhs.data);
+        bool contains(const Block& rhs) const noexcept {
+            return ::contains<BlockSize>(data, rhs.data);
         }
 
-        bool intersects(const Segment& rhs) const noexcept {
-            return ::intersects<SegmentBits>(data, rhs.data);
+        bool intersects(const Block& rhs) const noexcept {
+            return ::intersects<BlockSize>(data, rhs.data);
         }
 
-        bool operator==(const Segment& rhs) const noexcept {
-            return cmpeq<SegmentBits>(data, rhs.data);
+        bool operator==(const Block& rhs) const noexcept {
+            return cmpeq<BlockSize>(data, rhs.data);
         }
 
-        bool operator!=(const Segment& rhs) const noexcept {
+        bool operator!=(const Block& rhs) const noexcept {
             return !(*this == rhs);
         }
 
-        bool operator|=(const Segment& rhs) noexcept {
-            return ::or_inplace<SegmentBits>(data, rhs.data);
+        bool operator|=(const Block& rhs) noexcept {
+            return ::or_inplace<BlockSize>(data, rhs.data);
         }
 
-        ComposedChangeResult operator&=(const Segment& rhs) noexcept {
-            return ::and_inplace<SegmentBits>(data, rhs.data);
+        ComposedChangeResult operator&=(const Block& rhs) noexcept {
+            return ::and_inplace<BlockSize>(data, rhs.data);
         }
 
-        ComposedChangeResult operator-=(const Segment& rhs) noexcept {
-            return ::diff_inplace<SegmentBits>(data, rhs.data);
+        ComposedChangeResult operator-=(const Block& rhs) noexcept {
+            return ::diff_inplace<BlockSize>(data, rhs.data);
         }
     };
-    static_assert(sizeof(Segment) * 8 == SegmentBits);
+    static_assert(sizeof(Block) * 8 == BlockSize);
 
     using index_t = uint32_t;
 
 protected:
     using index_container =
         std::vector<index_t, AlignedAllocatorWithThreshold<index_t, 64>>;
-    using data_container =
-        std::vector<Segment, AlignedAllocatorWithThreshold<Segment, 64>>;
+    using block_container =
+        std::vector<Block, AlignedAllocatorWithThreshold<Block, 64>>;
     index_container indexes;
-    data_container data;
+    block_container blocks;
 
-    /// Returns # of segments.
+    /// Returns # of blocks.
     _inline size_t size() const noexcept {
         return indexes.size();
     }
     _inline index_t index_at(size_t i) const noexcept {
         return indexes[i];
     }
-    _inline Segment& data_at(size_t i) noexcept {
-        return data[i];
+    _inline Block& block_at(size_t i) noexcept {
+        return blocks[i];
     }
-    _inline const Segment& data_at(size_t i) const noexcept {
-        return data[i];
+    _inline const Block& block_at(size_t i) const noexcept {
+        return blocks[i];
     }
     _inline void erase_at(size_t i) noexcept {
         indexes.erase(indexes.begin() + i);
-        data.erase(data.begin() + i);
+        blocks.erase(blocks.begin() + i);
     }
     _inline void truncate(size_t keep_count) noexcept {
         indexes.resize(keep_count);
-        data.resize(keep_count);
+        blocks.resize(keep_count);
     }
     template <typename... Args>
     _inline void emplace_at(size_t i, const index_t& ind,
-                            Args&&... seg) noexcept {
+                            Args&&... blkArgs) noexcept {
         indexes.emplace(indexes.begin() + i, ind);
-        data.emplace(data.begin() + i, std::forward<Args>(seg)...);
+        blocks.emplace(blocks.begin() + i, std::forward<Args>(blkArgs)...);
     }
 
 public:
-    class SegmentBitVectorIterator {
+    class IndexedBlockBitVectorIterator {
     public:
         using iterator_category = std::input_iterator_tag;
         using value_type = index_t;
@@ -237,17 +237,17 @@ public:
     protected:
         typename index_container::const_iterator indexIt;
         typename index_container::const_iterator indexEnd;
-        typename data_container::const_iterator dataIt;
-        unsigned char unit_index; // unit index in the current segment
+        typename block_container::const_iterator blockIt;
+        unsigned char unit_index; // unit index in the current block
         unsigned char bit_index;  // bit index in the current unit
         bool end;
         /// move to next unit, returns false if reached the end
         void incr_unit() {
             bit_index = 0;
-            if (++unit_index == UnitsPerSegment) {
-                // forward to next segment
+            if (++unit_index == UnitsPerBlock) {
+                // forward to next block
                 unit_index = 0;
-                ++indexIt, ++dataIt;
+                ++indexIt, ++blockIt;
                 if (indexIt == indexEnd)
                     // reached the end
                     end = true;
@@ -263,7 +263,7 @@ public:
         void search() {
             while (!end) {
                 auto mask = ~((static_cast<UnitType>(1) << bit_index) - 1);
-                auto masked_unit = dataIt->data[unit_index] & mask;
+                auto masked_unit = blockIt->data[unit_index] & mask;
                 auto tz_count = SIMD::bit::tzcnt(masked_unit);
                 if (tz_count < UnitBits) {
                     // found a set bit
@@ -281,18 +281,19 @@ public:
         }
 
     public:
-        SegmentBitVectorIterator() = delete;
-        SegmentBitVectorIterator(const SegmentBitVector& vec, bool end = false)
+        IndexedBlockBitVectorIterator() = delete;
+        IndexedBlockBitVectorIterator(const IndexedBlockBitVector& vec,
+                                      bool end = false)
             : // must be init to identify raw vector
               indexEnd(vec.indexes.end()), end(end | vec.empty()) {
             if (end) return;
             indexIt = vec.indexes.begin();
-            dataIt = vec.data.begin();
+            blockIt = vec.blocks.begin();
             unit_index = 0;
             bit_index = 0;
             search();
         }
-        DEFAULT_COPY_MOVE(SegmentBitVectorIterator);
+        DEFAULT_COPY_MOVE(IndexedBlockBitVectorIterator);
 
         reference operator*() const {
             return cur_pos;
@@ -300,54 +301,56 @@ public:
         pointer operator->() const {
             return &cur_pos;
         }
-        SegmentBitVectorIterator& operator++() {
+        IndexedBlockBitVectorIterator& operator++() {
             forward();
             return *this;
         }
-        SegmentBitVectorIterator operator++(int) {
-            SegmentBitVectorIterator temp = *this;
+        IndexedBlockBitVectorIterator operator++(int) {
+            IndexedBlockBitVectorIterator temp = *this;
             ++*this;
             return temp;
         }
-        bool operator==(const SegmentBitVectorIterator& other) const {
+        bool operator==(const IndexedBlockBitVectorIterator& other) const {
             return
-                // created from the same SegmentBitVector, and
+                // created from the same vector, and
                 indexEnd == other.indexEnd &&
                 (( // both ended, or
                      end && other.end) ||
                  ( // both not ended and pointing to the same position
                      end == other.end && cur_pos == other.cur_pos));
         }
-        bool operator!=(const SegmentBitVectorIterator& other) const {
+        bool operator!=(const IndexedBlockBitVectorIterator& other) const {
             return !(*this == other);
         }
     };
-    using iterator = SegmentBitVectorIterator;
+    using iterator = IndexedBlockBitVectorIterator;
 
-    /// Returns an iterator to the beginning of this SegmentBitVector.
+    /// Returns an iterator to the beginning of this vector.
     /// NOTE: If you modify the vector after creating an iterator, the iterator
     /// is not stable and may cause UB if used.
-    const SegmentBitVectorIterator begin() const {
-        return SegmentBitVectorIterator(*this);
+    const IndexedBlockBitVectorIterator begin() const {
+        return IndexedBlockBitVectorIterator(*this);
     }
-    const SegmentBitVectorIterator end() const {
-        return SegmentBitVectorIterator(*this, true);
+    const IndexedBlockBitVectorIterator end() const {
+        return IndexedBlockBitVectorIterator(*this, true);
     }
 
-    /// Construct empty SegmentBitVector
-    SegmentBitVector(void) {}
+    /// Construct empty vector
+    IndexedBlockBitVector(void) {}
 
     /// Copy constructor
-    SegmentBitVector(const SegmentBitVector& other) = default;
+    IndexedBlockBitVector(const IndexedBlockBitVector& other) = default;
 
     /// Move constructor
-    SegmentBitVector(SegmentBitVector&& other) noexcept = default;
+    IndexedBlockBitVector(IndexedBlockBitVector&& other) noexcept = default;
 
     /// Copy assignment
-    SegmentBitVector& operator=(const SegmentBitVector& other) = default;
+    IndexedBlockBitVector& operator=(const IndexedBlockBitVector& other) =
+        default;
 
     /// Move assignment
-    SegmentBitVector& operator=(SegmentBitVector&& other) noexcept = default;
+    IndexedBlockBitVector& operator=(IndexedBlockBitVector&& other) noexcept =
+        default;
 
     /// Returns true if no bits are set.
     bool empty() const noexcept {
@@ -360,20 +363,20 @@ public:
         if (size() == 0) return 0;
 
 #if __AVX512VPOPCNTDQ__ && __AVX512VL__
-        auto it = data.begin();
-        const auto v0 = avx_vec<SegmentBits>::load(&(it->data));
-        auto c = avx_vec<SegmentBits>::popcnt(v0);
+        auto it = blocks.begin();
+        const auto v0 = avx_vec<BlockSize>::load(&(it->data));
+        auto c = avx_vec<BlockSize>::popcnt(v0);
         ++it;
-        for (; it != data.end(); ++it) {
-            const auto curv = avx_vec<SegmentBits>::load(&(it->data));
-            const auto curc = avx_vec<SegmentBits>::popcnt(curv);
-            c = avx_vec<SegmentBits>::add_op(c, curc);
+        for (; it != blocks.end(); ++it) {
+            const auto curv = avx_vec<BlockSize>::load(&(it->data));
+            const auto curc = avx_vec<BlockSize>::popcnt(curv);
+            c = avx_vec<BlockSize>::add_op(c, curc);
         }
-        return avx_vec<SegmentBits>::reduce_add(c);
+        return avx_vec<BlockSize>::reduce_add(c);
 #else
         uint32_t result = 0;
         auto arr = reinterpret_cast<const uint32_t*>(this->data.data());
-        for (size_t i = 0; i < size() * (sizeof(Segment) / 8); ++i, ++arr)
+        for (size_t i = 0; i < size() * (sizeof(Block) / 8); ++i, ++arr)
             result += SIMD::bit::popcnt(*arr);
         return result;
 #endif
@@ -382,57 +385,57 @@ public:
     /// Empty the set.
     void clear() noexcept {
         indexes.clear();
-        data.clear();
+        blocks.clear();
     }
 
     /// Returns true if n is in this set.
     bool test(uint32_t n) const noexcept {
-        const auto target_ind = n - (n % SegmentBits);
+        const auto target_ind = n - (n % BlockSize);
         const auto low_pos =
             std::lower_bound(indexes.begin(), indexes.end(), target_ind);
         const auto i = std::distance(indexes.begin(), low_pos);
         if (low_pos == indexes.end() || *low_pos != target_ind) // not found
             return false;
-        else return data_at(i).test(n % SegmentBits);
+        else return block_at(i).test(n % BlockSize);
     }
 
     void set(uint32_t n) noexcept {
-        const auto target_ind = n - (n % SegmentBits);
+        const auto target_ind = n - (n % BlockSize);
         const auto low_pos =
             std::lower_bound(indexes.begin(), indexes.end(), target_ind);
         const auto i = std::distance(indexes.begin(), low_pos);
         if (low_pos == indexes.end() || *low_pos != target_ind) // not found
-            emplace_at(i, target_ind, n % SegmentBits);
-        else return data_at(i).set(n % SegmentBits);
+            emplace_at(i, target_ind, n % BlockSize);
+        else return block_at(i).set(n % BlockSize);
     }
 
     /// Check if bit is set. If it is, returns false.
     /// Otherwise, sets bit and returns true.
     bool test_and_set(uint32_t n) noexcept {
-        const auto target_ind = n - (n % SegmentBits);
+        const auto target_ind = n - (n % BlockSize);
         const auto low_pos =
             std::lower_bound(indexes.begin(), indexes.end(), target_ind);
         const auto i = std::distance(indexes.begin(), low_pos);
         if (low_pos == indexes.end() || *low_pos != target_ind) { // not found
-            emplace_at(i, target_ind, n % SegmentBits);
+            emplace_at(i, target_ind, n % BlockSize);
             return true;
-        } else return data_at(i).test_and_set(n % SegmentBits);
+        } else return block_at(i).test_and_set(n % BlockSize);
     }
 
     void reset(uint32_t n) noexcept {
-        const auto target_ind = n - (n % SegmentBits);
+        const auto target_ind = n - (n % BlockSize);
         const auto low_pos =
             std::lower_bound(indexes.begin(), indexes.end(), target_ind);
         if (low_pos == indexes.end() || *low_pos != target_ind)
             return; // not found
         const auto i = std::distance(indexes.begin(), low_pos);
-        auto& d = data_at(i);
-        d.reset(n % SegmentBits);
-        if (d.empty()) erase_at(i); // this segment is empty, remove it
+        auto& d = block_at(i);
+        d.reset(n % BlockSize);
+        if (d.empty()) erase_at(i); // this block is empty, remove it
     }
 
     /// Returns true if this set contains all bits of rhs.
-    bool contains_simd(const SegmentBitVector& rhs) const noexcept {
+    bool contains_simd(const IndexedBlockBitVector& rhs) const noexcept {
         const auto this_size = size(), rhs_size = rhs.size();
         if (this_size < rhs_size) return false;
 
@@ -460,8 +463,8 @@ public:
                            _mm512_maskz_compress_epi32(match_this, asc_indexes),
                        gather_rhs_offset_u16x32 =
                            _mm512_maskz_compress_epi32(match_rhs, asc_indexes);
-            const auto gather_this_base_addr = data_at(this_i).data;
-            const auto gather_rhs_base_addr = rhs.data_at(rhs_i).data;
+            const auto gather_this_base_addr = block_at(this_i).data;
+            const auto gather_rhs_base_addr = rhs.block_at(rhs_i).data;
 
             const uint32_t n_matched_bits_dup =
                 ((uint64_t)1 << (n_matched * 2)) - 1;
@@ -498,14 +501,15 @@ public:
             if (this_ind > rhs_ind) return false;
             if (this_ind < rhs_ind) ++this_i;
             else {
-                if (!data_at(this_i).contains(rhs.data_at(rhs_i))) return false;
+                if (!block_at(this_i).contains(rhs.block_at(rhs_i)))
+                    return false;
                 ++this_i, ++rhs_i;
             }
         }
         return rhs_i == rhs.size();
     }
 
-    bool contains_loop(const SegmentBitVector& rhs) const noexcept {
+    bool contains_loop(const IndexedBlockBitVector& rhs) const noexcept {
         size_t this_i = 0, rhs_i = 0;
         while (this_i < size() && rhs_i < rhs.size()) {
             const auto this_ind = index_at(this_i);
@@ -513,14 +517,15 @@ public:
             if (this_ind > rhs_ind) return false;
             if (this_ind < rhs_ind) ++this_i;
             else {
-                if (!data_at(this_i).contains(rhs.data_at(rhs_i))) return false;
+                if (!block_at(this_i).contains(rhs.block_at(rhs_i)))
+                    return false;
                 ++this_i, ++rhs_i;
             }
         }
         return rhs_i == rhs.size();
     }
 
-    bool contains(const SegmentBitVector& rhs) const noexcept {
+    bool contains(const IndexedBlockBitVector& rhs) const noexcept {
         return contains_simd(rhs);
         // auto simd_result = contains_simd(rhs), loop_result =
         // contains_loop(rhs); assert(simd_result == loop_result); return
@@ -529,7 +534,7 @@ public:
 
     // TODO: use SIMD to improve perf
     /// Returns true if this set and rhs share any bits.
-    bool intersects(const SegmentBitVector& rhs) const noexcept {
+    bool intersects(const IndexedBlockBitVector& rhs) const noexcept {
         size_t this_i = 0, rhs_i = 0;
         while (this_i < size() && rhs_i < rhs.size()) {
             const auto this_ind = index_at(this_i);
@@ -537,7 +542,7 @@ public:
             if (this_ind > rhs_ind) ++rhs_i;
             else if (this_ind < rhs_ind) ++this_i;
             else {
-                if (this->data_at(this_i).intersects(rhs.data_at(rhs_i)))
+                if (this->block_at(this_i).intersects(rhs.block_at(rhs_i)))
                     return true;
                 ++this_i, ++rhs_i;
             }
@@ -545,30 +550,29 @@ public:
         return false;
     }
 
-    bool operator==(const SegmentBitVector& rhs) const noexcept {
+    bool operator==(const IndexedBlockBitVector& rhs) const noexcept {
         if (size() != rhs.size()) return false;
         return std::memcmp(indexes.data(), rhs.indexes.data(),
                            sizeof(index_t) * size()) == 0 &&
-               std::memcmp(data.data(), rhs.data.data(),
-                           sizeof(Segment) * size()) == 0;
+               std::memcmp(blocks.data(), rhs.blocks.data(),
+                           sizeof(Block) * size()) == 0;
     }
 
-    bool operator!=(const SegmentBitVector& rhs) const noexcept {
+    bool operator!=(const IndexedBlockBitVector& rhs) const noexcept {
         return !(*this == rhs);
     }
 
-    bool union_simd3(const SegmentBitVector& rhs) {
-        // Update `this` inplace, save extra segments to temp
+    bool union_simd3(const IndexedBlockBitVector& rhs) {
+        // Update `this` inplace, save extra blocks to temp
         const auto this_size = size(), rhs_size = rhs.size();
         size_t this_i = 0, rhs_i = 0;
         bool changed = false;
         size_t extra_count = 0;
         index_t* extra_indexes =
             (index_t*)std::malloc(sizeof(index_t) * rhs_size);
-        Segment* extra_segments =
-            (Segment*)std::malloc(sizeof(Segment) * rhs_size);
+        Block* extra_blocks = (Block*)std::malloc(sizeof(Block) * rhs_size);
 
-        alignas(64) Segment rhs_data_temp[512 / (sizeof(index_t) * 8)];
+        alignas(64) Block rhs_block_temp[512 / (sizeof(index_t) * 8)];
         while (this_i + 16 <= this_size && rhs_i + 16 <= rhs_size) {
             /// indexes[this_i..this_i + 16]
             const auto v_this_idx = _mm512_loadu_epi32(indexes.data() + this_i),
@@ -582,19 +586,19 @@ public:
             ADV_COUNT;
 
             auto match_this_temp = match_this;
-            Segment* store_seg_base = rhs_data_temp;
+            Block* store_blk_base = rhs_block_temp;
             for (auto i = 0; i < advance_rhs; ++i) {
-                const auto& rhs_data_cur = rhs.data_at(rhs_i + i);
+                const auto& rhs_block_cur = rhs.block_at(rhs_i + i);
                 if (match_rhs & (1 << i)) { // check bits[i]
-                    // copy current rhs seg into right pos
+                    // copy current rhs block into right pos
                     const auto this_pad = SIMD::bit::tzcnt(match_this_temp);
-                    store_seg_base += this_pad;
-                    *store_seg_base = rhs_data_cur;
-                    ++store_seg_base;
+                    store_blk_base += this_pad;
+                    *store_blk_base = rhs_block_cur;
+                    ++store_blk_base;
                     match_this_temp >>= this_pad + 1;
-                } else { // current rhs seg is extra
+                } else { // current rhs block is extra
                     extra_indexes[extra_count] = rhs.index_at(rhs_i + i);
-                    extra_segments[extra_count] = rhs_data_cur;
+                    extra_blocks[extra_count] = rhs_block_cur;
                     ++extra_count;
                 }
             }
@@ -602,20 +606,20 @@ public:
             /// each u32 index match => 2*u64 (data) to store & compute
             auto dup_match_this = duplicate_bits(match_this);
 
-            // compute OR result of matched segments
+            // compute OR result of matched blocks
             REPEAT_i_4({
-                /// matched & ordered 4 segments (8 u64) from memory. zero in
+                /// matched & ordered 4 blocks (8 u64) from memory. zero in
                 /// case of out of bounds
                 const auto v_this =
-                    _mm512_loadu_epi64(&data_at(this_i + i * 4));
+                    _mm512_loadu_epi64(&block_at(this_i + i * 4));
                 const auto v_rhs = _mm512_maskz_loadu_epi64(
-                    dup_match_this >> (i * 8), &rhs_data_temp[i * 4]);
+                    dup_match_this >> (i * 8), &rhs_block_temp[i * 4]);
                 const auto or_result = _mm512_or_epi64(v_this, v_rhs);
 
                 if (!changed) // compute `changed` if not already set
                     changed = !avx_vec<512>::eq_cmp(v_this, or_result);
 
-                _mm512_storeu_epi64(&data_at(this_i + i * 4), or_result);
+                _mm512_storeu_epi64(&block_at(this_i + i * 4), or_result);
             });
             this_i += advance_this, rhs_i += advance_rhs;
         }
@@ -626,104 +630,68 @@ public:
             const auto rhs_ind = rhs.index_at(rhs_i);
             if (this_ind < rhs_ind) ++this_i;
             else if (this_ind > rhs_ind) {
-                // copy current rhs segment to temp
+                // copy current rhs block to temp
                 extra_indexes[extra_count] = rhs_ind;
-                extra_segments[extra_count] = rhs.data_at(rhs_i);
+                extra_blocks[extra_count] = rhs.block_at(rhs_i);
                 ++extra_count;
                 ++rhs_i;
             } else { // this_ind == rhs_ind
-                changed |= (data_at(this_i) |= rhs.data_at(rhs_i));
+                changed |= (block_at(this_i) |= rhs.block_at(rhs_i));
                 ++this_i, ++rhs_i;
             }
         }
-        /// whether any extra segments are added (requires merge sort)
+        /// whether any extra blocks are added (requires merge sort)
         const bool any_extra = extra_count > 0;
-        /// whether any remaining segments in rhs (extra & largest)
+        /// whether any remaining blocks in rhs (extra & largest)
         const bool rhs_remaining = rhs_i < rhs_size;
         changed |= any_extra || rhs_remaining;
         const auto new_size = this_size + extra_count + (rhs_size - rhs_i);
         this->indexes.resize(new_size);
-        this->data.resize(new_size);
+        this->blocks.resize(new_size);
         if (any_extra) {
-            // inplace merge sort (also arrange segments).
+            // inplace merge sort (also arrange blocks).
             signed int dest_i = this_size + extra_count - 1,
                        src_i = this_size - 1, extra_i = extra_count - 1;
             while (src_i >= 0 && extra_i >= 0) {
                 if (index_at(src_i) > extra_indexes[extra_i]) {
                     indexes[dest_i] = index_at(src_i);
-                    data[dest_i] = data_at(src_i);
+                    blocks[dest_i] = block_at(src_i);
                     --src_i;
                 } else {
                     indexes[dest_i] = extra_indexes[extra_i];
-                    data[dest_i] = extra_segments[extra_i];
+                    blocks[dest_i] = extra_blocks[extra_i];
                     --extra_i;
                 }
                 --dest_i;
             }
             if (extra_i >= 0) {
-                // copy remaining extra segments
+                // copy remaining extra blocks
                 std::memcpy(&indexes[0], &extra_indexes[0],
                             sizeof(index_t) * (extra_i + 1));
-                std::memcpy(&data[0], &extra_segments[0],
-                            sizeof(Segment) * (extra_i + 1));
+                std::memcpy(&blocks[0], &extra_blocks[0],
+                            sizeof(Block) * (extra_i + 1));
             }
             // else if src_i >= 0, they are already in place
         }
         std::free(extra_indexes);
-        std::free(extra_segments);
+        std::free(extra_blocks);
         if (rhs_remaining) { // remaining elements in rhs are always largest
             std::memcpy(&indexes[this_size + extra_count], &rhs.indexes[rhs_i],
                         sizeof(index_t) * (rhs_size - rhs_i));
-            std::memcpy(&data[this_size + extra_count], &rhs.data[rhs_i],
-                        sizeof(Segment) * (rhs_size - rhs_i));
+            std::memcpy(&blocks[this_size + extra_count], &rhs.blocks[rhs_i],
+                        sizeof(Block) * (rhs_size - rhs_i));
         }
         return changed;
     }
 
     /// Inplace union with rhs.
     /// Returns true if this set changed.
-    bool operator|=(const SegmentBitVector& rhs) {
+    bool operator|=(const IndexedBlockBitVector& rhs) {
         return union_simd3(rhs);
-
-        // auto copy2 = *this;
-        // auto result_simd2 = copy2.union_simd2(rhs);
-
-        // auto copy3 = *this;
-        // auto result_simd3 = copy3.union_simd3(rhs);
-
-        // const auto rhs_size = rhs.size();
-        // indexes.reserve(rhs_size);
-        // data.reserve(rhs_size);
-        // size_t this_i = 0, rhs_i = 0;
-        // bool changed = false;
-        // while (this_i < size() && rhs_i < rhs_size) {
-        //     const auto this_ind = index_at(this_i);
-        //     const auto rhs_ind = rhs.index_at(rhs_i);
-        //     if (this_ind < rhs_ind) ++this_i;
-        //     else if (this_ind > rhs_ind) {
-        //         // copy current rhs segment to this
-        //         emplace_at(this_i, rhs_ind, rhs.data_at(rhs_i));
-        //         changed = true;
-        //         ++this_i, ++rhs_i;
-        //     } else {
-        //         changed |= (data_at(this_i) |= rhs.data_at(rhs_i));
-        //         ++this_i, ++rhs_i;
-        //     }
-        // }
-        // if (rhs_i < rhs_size) {
-        //     // append remaining elements from rhs
-        //     push_back_till_end(rhs, rhs_i);
-        //     changed = true;
-        // }
-        // assert(result_simd2 == changed);
-        // assert(result_simd3 == changed);
-        // assert(*this == copy2);
-        // assert(*this == copy3);
-        // return changed;
     }
 
-    SegmentBitVector operator|(const SegmentBitVector& rhs) const {
-        SegmentBitVector copy(*this);
+    IndexedBlockBitVector operator|(const IndexedBlockBitVector& rhs) const {
+        IndexedBlockBitVector copy(*this);
         copy |= rhs;
         return copy;
     }
@@ -731,7 +699,7 @@ public:
     /// Inplace intersection with rhs.
     /// Returns true if this set changed.
     /// Optimized using AVX512 intrinsics, requires AVX512F inst set.
-    bool intersect_simd(const SegmentBitVector& rhs) {
+    bool intersect_simd(const IndexedBlockBitVector& rhs) {
         const auto this_size = size(), rhs_size = rhs.size();
         size_t valid_count = 0, this_i = 0, rhs_i = 0;
         bool changed = false;
@@ -753,8 +721,8 @@ public:
                            _mm512_maskz_compress_epi32(match_this, asc_indexes),
                        gather_rhs_offset_u16x32 =
                            _mm512_maskz_compress_epi32(match_rhs, asc_indexes);
-            const auto gather_this_base_addr = data_at(this_i).data;
-            const auto gather_rhs_base_addr = rhs.data_at(rhs_i).data;
+            const auto gather_this_base_addr = block_at(this_i).data;
+            const auto gather_rhs_base_addr = rhs.block_at(rhs_i).data;
 
             const auto ordered_indexes =
                 _mm512_maskz_compress_epi32(match_this, v_this_idx);
@@ -763,7 +731,7 @@ public:
             const uint32_t n_matched_bits_dup =
                 ((uint64_t)1 << (n_matched * 2)) - 1;
 
-            // compute AND result of matched segments
+            // compute AND result of matched blocks
             REPEAT_i_4({
                 const auto cur_gather_this_offset_u16x8 =
                     _mm512_extracti64x2_epi64(gather_this_offset_u16x32, i);
@@ -775,7 +743,7 @@ public:
                 const auto cur_gather_rhs_offset_u64x8 =
                     _mm512_cvtepu16_epi64(cur_gather_rhs_offset_u16x8);
 
-                /// matched & ordered 4 segments (8 u64) from memory. zero
+                /// matched & ordered 4 blocks (8 u64) from memory. zero
                 /// in case of out of bounds
                 const auto intersect_this = _mm512_mask_i64gather_epi64(
                     all_zero, n_matched_bits_dup >> i * 8,
@@ -793,21 +761,21 @@ public:
                 const auto nzero_mask =
                     _mm512_test_epi64_mask(and_result, and_result);
                 // _bit[2k] := bit[2k] | bit[2k+1]
-                uint8_t nzero_mask_by_segment =
+                uint8_t nzero_mask_by_block =
                     nzero_mask | ((nzero_mask & 0b10101010) >> 1);
                 // _bit[k] := bit[2k] | bit[2k+1]
                 const auto nzero_compressed =
-                    _pext_u32(nzero_mask_by_segment, 0b01010101);
+                    _pext_u32(nzero_mask_by_block, 0b01010101);
                 // _bit[2k+1] := bit[2k] | bit[2k+1],
                 // compute here to improve pipeline perf
-                nzero_mask_by_segment |= ((nzero_mask & 0b01010101) << 1);
-                // store new index & data for 4 segments (remove empty
-                // segments)
+                nzero_mask_by_block |= ((nzero_mask & 0b01010101) << 1);
+                // store new index & data for 4 blocks (remove empty
+                // blocks)
                 _mm512_mask_compressstoreu_epi32(indexes.data() + valid_count,
                                                  nzero_compressed << (i * 4),
                                                  ordered_indexes);
-                _mm512_mask_compressstoreu_epi64(data.data() + valid_count,
-                                                 nzero_mask_by_segment,
+                _mm512_mask_compressstoreu_epi64(blocks.data() + valid_count,
+                                                 nzero_mask_by_block,
                                                  and_result);
 
                 const auto nzero_count = _mm_popcnt_u32(nzero_compressed);
@@ -821,28 +789,28 @@ public:
             const auto this_ind = index_at(this_i);
             const auto rhs_ind = rhs.index_at(rhs_i);
             if (this_ind < rhs_ind) {
-                // ignore this segment (not copied to valid position)
+                // ignore this block (not copied to valid position)
                 ++this_i;
                 changed = true;
             } else if (this_ind > rhs_ind) ++rhs_i;
             else { // this_ind == rhs_ind
                 const auto vcur_this =
-                               avx_vec<SegmentBits>::load(data_at(this_i).data),
-                           vcur_rhs = avx_vec<SegmentBits>::load(
-                               rhs.data_at(rhs_i).data);
+                               avx_vec<BlockSize>::load(block_at(this_i).data),
+                           vcur_rhs = avx_vec<BlockSize>::load(
+                               rhs.block_at(rhs_i).data);
                 const auto and_result =
-                    avx_vec<SegmentBits>::and_op(vcur_this, vcur_rhs);
-                if (avx_vec<SegmentBits>::is_zero(and_result))
-                    // no bits in common, skip this segment
+                    avx_vec<BlockSize>::and_op(vcur_this, vcur_rhs);
+                if (avx_vec<BlockSize>::is_zero(and_result))
+                    // no bits in common, skip this block
                     changed = true;
                 else {
                     if (!changed) // compute `changed` if not already set
-                        changed = !avx_vec<SegmentBits>::eq_cmp(vcur_this,
-                                                                and_result);
+                        changed =
+                            !avx_vec<BlockSize>::eq_cmp(vcur_this, and_result);
 
                     // store the result
-                    avx_vec<SegmentBits>::store(data_at(valid_count).data,
-                                                and_result);
+                    avx_vec<BlockSize>::store(block_at(valid_count).data,
+                                              and_result);
                     indexes[valid_count] = this_ind;
                     ++valid_count; // increment valid count
                 }
@@ -855,42 +823,17 @@ public:
     }
     /// Inplace intersection with rhs.
     /// Returns true if this set changed.
-    bool operator&=(const SegmentBitVector& rhs) {
+    bool operator&=(const IndexedBlockBitVector& rhs) {
         return intersect_simd(rhs);
-
-        // // old implementation without SIMD
-        // bool changed = false;
-        // size_t this_i = 0, rhs_i = 0;
-        // while (this_i < size() && rhs_i < rhs.size()) {
-        //     const auto this_ind = index_at(this_i);
-        //     const auto rhs_ind = rhs.index_at(rhs_i);
-        //     if (this_ind < rhs_ind) {
-        //         erase_at(this_i);
-        //         changed = true;
-        //     } else if (this_ind > rhs_ind) ++rhs_i;
-        //     else {
-        //         const auto [cur_changed, zeroed] =
-        //             (data_at(this_i) &= rhs.data_at(rhs_i));
-        //         changed |= cur_changed;
-        //         if (zeroed) erase_at(this_i); // remove empty segment
-        //         else ++this_i;
-        //         ++rhs_i;
-        //     }
-        // }
-        // if (this_i < size()) {
-        //     // remove remaining elements from this
-        //     truncate(this_i);
-        //     changed = true;
-        // }
-        // return changed;
     }
+
     /// Inplace difference with rhs.
     /// Returns true if this set changed.
-    bool diff_simd(const SegmentBitVector& rhs) {
+    bool diff_simd(const IndexedBlockBitVector& rhs) {
         const auto this_size = size(), rhs_size = rhs.size();
         size_t valid_count = 0, this_i = 0, rhs_i = 0;
         bool changed = false;
-        alignas(64) Segment rhs_data_temp[512 / (sizeof(index_t) * 8)];
+        alignas(64) Block rhs_block_temp[512 / (sizeof(index_t) * 8)];
         while (this_i + 16 <= this_size && rhs_i + 16 <= rhs_size) {
             /// indexes[this_i..this_i + 16]
             const auto v_this_idx = _mm512_loadu_epi32(indexes.data() + this_i),
@@ -906,16 +849,16 @@ public:
             // align matched data of rhs to the shape of this.
             // we don't care unmatched position
             auto matched_this_temp = match_this, matched_rhs_temp = match_rhs;
-            auto rhs_data_temp_addr = rhs_data_temp,
-                 rhs_data_addr = &rhs.data_at(rhs_i);
+            auto rhs_block_temp_addr = rhs_block_temp,
+                 rhs_block_addr = &rhs.block_at(rhs_i);
             while (matched_this_temp) {
                 const auto this_pad = SIMD::bit::tzcnt(matched_this_temp),
                            rhs_pad = SIMD::bit::tzcnt(matched_rhs_temp);
-                rhs_data_temp_addr += this_pad, rhs_data_addr += rhs_pad;
-                *rhs_data_temp_addr = *rhs_data_addr;
+                rhs_block_temp_addr += this_pad, rhs_block_addr += rhs_pad;
+                *rhs_block_temp_addr = *rhs_block_addr;
                 matched_this_temp >>= this_pad + 1,
                     matched_rhs_temp >>= rhs_pad + 1;
-                ++rhs_data_temp_addr, ++rhs_data_addr;
+                ++rhs_block_temp_addr, ++rhs_block_addr;
             }
 
             /// each u32 index match => 2*u64 (data) to store & compute
@@ -924,14 +867,14 @@ public:
                 ((uint32_t)1 << advance_this) - 1;
             const auto dup_advance_this = duplicate_bits(advance_this_to_bits);
 
-            // compute AND result of matched segments
+            // compute AND result of matched blocks
             REPEAT_i_4({
-                /// matched & ordered 4 segments (8 u64) from memory. zero
+                /// matched & ordered 4 blocks (8 u64) from memory. zero
                 /// in case of out of bounds
                 const auto v_this = _mm512_maskz_loadu_epi64(
-                    dup_advance_this >> (i * 8), &data_at(this_i) + i * 4);
+                    dup_advance_this >> (i * 8), &block_at(this_i) + i * 4);
                 const auto v_rhs = _mm512_maskz_loadu_epi64(
-                    dup_this >> (i * 8), &rhs_data_temp[i * 4]);
+                    dup_this >> (i * 8), &rhs_block_temp[i * 4]);
                 // _mm512_andnot_epi64 intrinsic: NOT of 512 bits (composed
                 // of packed 64-bit integers) in a and then AND with b
                 const auto andnot_result = _mm512_andnot_epi64(v_rhs, v_this);
@@ -943,21 +886,21 @@ public:
                 const auto nzero_mask =
                     _mm512_test_epi64_mask(andnot_result, andnot_result);
                 // _bit[2k] := bit[2k] | bit[2k+1]
-                uint8_t nzero_mask_by_segment =
+                uint8_t nzero_mask_by_block =
                     nzero_mask | ((nzero_mask & 0b10101010) >> 1);
                 // _bit[k] := bit[2k] | bit[2k+1]
                 const auto nzero_compressed =
-                    _pext_u32(nzero_mask_by_segment, 0b01010101);
+                    _pext_u32(nzero_mask_by_block, 0b01010101);
                 // _bit[2k+1] := bit[2k] | bit[2k+1],
                 // compute here to improve pipeline perf
-                nzero_mask_by_segment |= ((nzero_mask & 0b01010101) << 1);
-                // store new index & data for 4 segments (remove empty
-                // segments)
+                nzero_mask_by_block |= ((nzero_mask & 0b01010101) << 1);
+                // store new index & data for 4 blocks (remove empty
+                // blocks)
                 _mm512_mask_compressstoreu_epi32(indexes.data() + valid_count,
                                                  nzero_compressed << (i * 4),
                                                  v_this_idx);
-                _mm512_mask_compressstoreu_epi64(data.data() + valid_count,
-                                                 nzero_mask_by_segment,
+                _mm512_mask_compressstoreu_epi64(blocks.data() + valid_count,
+                                                 nzero_mask_by_block,
                                                  andnot_result);
 
                 const auto nzero_count = _mm_popcnt_u32(nzero_compressed);
@@ -968,29 +911,28 @@ public:
         while (this_i < this_size && rhs_i < rhs_size) {
             const auto this_ind = index_at(this_i);
             const auto rhs_ind = rhs.index_at(rhs_i);
-            if (this_ind < rhs_ind) { // keep this segment
+            if (this_ind < rhs_ind) { // keep this block
                 indexes[valid_count] = this_ind;
-                data_at(valid_count) = data_at(this_i);
+                block_at(valid_count) = block_at(this_i);
                 ++this_i;
                 ++valid_count;
             } else if (this_ind > rhs_ind) ++rhs_i;
             else { // compute ANDNOT
-                const auto v_this =
-                    avx_vec<SegmentBits>::load(&data_at(this_i));
+                const auto v_this = avx_vec<BlockSize>::load(&block_at(this_i));
                 const auto v_rhs =
-                    avx_vec<SegmentBits>::load(&rhs.data_at(rhs_i));
+                    avx_vec<BlockSize>::load(&rhs.block_at(rhs_i));
                 const auto andnot_result =
-                    avx_vec<SegmentBits>::andnot_op(v_this, v_rhs);
-                if (avx_vec<SegmentBits>::is_zero(
+                    avx_vec<BlockSize>::andnot_op(v_this, v_rhs);
+                if (avx_vec<BlockSize>::is_zero(
                         andnot_result)) // changed to zero
                     changed = true;
                 else {
                     if (!changed)
-                        changed = !avx_vec<SegmentBits>::eq_cmp(v_this,
-                                                                andnot_result);
+                        changed =
+                            !avx_vec<BlockSize>::eq_cmp(v_this, andnot_result);
                     indexes[valid_count] = this_ind;
-                    avx_vec<SegmentBits>::store(&data_at(valid_count),
-                                                andnot_result);
+                    avx_vec<BlockSize>::store(&block_at(valid_count),
+                                              andnot_result);
                     valid_count++;
                 }
                 ++this_i, ++rhs_i;
@@ -1000,40 +942,21 @@ public:
         const auto rest_count = this_size - this_i;
         std::memmove(&indexes[valid_count], &indexes[this_i],
                      sizeof(index_t) * rest_count);
-        std::memmove(&data_at(valid_count), &data_at(this_i),
-                     sizeof(Segment) * rest_count);
+        std::memmove(&block_at(valid_count), &block_at(this_i),
+                     sizeof(Block) * rest_count);
         valid_count += rest_count;
         truncate(valid_count);
         changed |= (valid_count != this_size);
         return changed;
     }
-    bool operator-=(const SegmentBitVector& rhs) {
+    bool operator-=(const IndexedBlockBitVector& rhs) {
         return diff_simd(rhs);
-
-        // bool changed = false;
-        // size_t this_i = 0, rhs_i = 0;
-        // while (this_i < size() && rhs_i < rhs.size()) {
-        //     const auto this_ind = index_at(this_i);
-        //     const auto rhs_ind = rhs.index_at(rhs_i);
-        //     if (this_ind < rhs_ind) ++this_i;
-        //     else if (this_ind > rhs_ind) ++rhs_i;
-        //     else {
-        //         const auto [cur_changed, zeroed] =
-        //             (data_at(this_i) -= rhs.data_at(rhs_i));
-        //         changed |= cur_changed;
-        //         if (zeroed) erase_at(this_i); // remove empty segment
-        //         else ++this_i;
-        //         ++rhs_i;
-        //     }
-        // }
-        // return changed;
     }
-    bool intersectWithComplement(const SegmentBitVector& rhs) {
+    bool intersectWithComplement(const IndexedBlockBitVector& rhs) {
         return *this -= rhs;
     }
-
-    void intersectWithComplement(const SegmentBitVector& lhs,
-                                 const SegmentBitVector& rhs) {
+    void intersectWithComplement(const IndexedBlockBitVector& lhs,
+                                 const IndexedBlockBitVector& rhs) {
         // TODO: inefficient!
         *this = lhs;
         intersectWithComplement(rhs);

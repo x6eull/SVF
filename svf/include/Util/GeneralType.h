@@ -40,7 +40,7 @@
 #include <vector>
 #include <memory>
 #include "Util/SparseBitVector.h"
-#include "Util/SegmentBitVector.h"
+#include "Util/IndexedBlockBitVector.h"
 
 namespace SVF
 {
@@ -60,8 +60,8 @@ typedef unsigned CallSiteID;
 typedef unsigned ThreadID;
 typedef s64_t APOffset;
 
-#if SVF_REPLACE_DEFAULT_PT
-typedef SegmentBitVector<> NodeBS;
+#if SVF_REPLACE_DEFAULT_PT 
+typedef IndexedBlockBitVector<> NodeBS;
 #else
 typedef SparseBitVector<> NodeBS;
 #endif
